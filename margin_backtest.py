@@ -66,37 +66,18 @@ def find_min_contracts(hedge_ratio):
     contracts_S1 / contracts_S2 ≈ hedge_ratio
     
     注意：Hedge Ratio 是「價格」層面的，但由於兩檔都是1口=2000股，
-    所以口數比 ≈ hedge_ratio × (price_S1 / price_S2) 的效應實際上
-    已經反映在 Spread 本身的計算中。
-    
-    對於 Spread = S2 - β × S1:
-    - 做多 Spread: 做多 1 口 S2 + 做空 β 口 S1
-    - 但口數必須是整數，所以要找近似比率
-    """
-    # hedge_ratio 是以元計算的: Spread = S2_price - HR * S1_price
-    # 但因為兩邊每口股數一樣(2000股)，要對沖的是：
-    # 名目金額匹配: contracts_S2 * P_S2 ≈ HR * contracts_S1 * P_S1
-    # 但在 spread 模型裡已經用一對一口算: S2 - HR * S1
-    # 所以最簡單方式：每邊各做 1 口，用 Spread 的 Z-Score 決定方向
-    # 但如果 hedge_ratio 差太多，需要調整口數
-    
-    # 用分數逼近
-    # 我們把 hedge_ratio 轉成分數 p/q
-    # 嘗試從 1~10 口找到最接近的整數比
-    best_error = float('inf')
-    best_s1 = 1
-    best_s2 = 1
-    
-    for s2 in range(1, 11):
-        for s1 in range(1, 11):
-            # 理想情況: s1/s2 = hedge_ratio
+def find_min_contracts(price_s1, price_s2):
+    target_ratio = price_s2 / price_s1
+    best_score = float('inf')
+    best_s1, best_s2 = 1, 1
+    for s2 in range(1, 21):
+        for s1 in range(1, 21):
             ratio = s1 / s2
-            error = abs(ratio - hedge_ratio)
-            if error < best_error:
-                best_error = error
-                best_s1 = s1
-                best_s2 = s2
-    
+            error = abs(ratio - target_ratio)
+            score = error + (s1 + s2) * 0.015
+            if score < best_score:
+                best_score = score
+                best_s1, best_s2 = s1, s2
     return best_s1, best_s2
 
 
@@ -139,12 +120,10 @@ def main():
     # ============================================================
     # 2. 計算最少配對口數 & 保證金需求
     # ============================================================
-    contracts_s1, contracts_s2 = find_min_contracts(hedge_ratio)
-    
-    # 取回測期間的起始價格做估算
     start_date = zscore.index[0]
     p1_start = S1[start_date]
     p2_start = S2[start_date]
+    contracts_s1, contracts_s2 = find_min_contracts(p1_start, p2_start)
     
     margin_s1 = calc_margin_per_contract(p1_start) * contracts_s1
     margin_s2 = calc_margin_per_contract(p2_start) * contracts_s2

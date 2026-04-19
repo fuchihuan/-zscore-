@@ -23,9 +23,9 @@ def main():
         
     print(f"Total tickers to query yfinance: {len(tickers_to_try)}")
     
-    # 5 years of data
+    # 抓取長期資料 (從 2013 至今)
     end_date = datetime.datetime.now()
-    start_date = end_date - datetime.timedelta(days=5 * 365.25)
+    start_date = datetime.datetime(2013, 1, 1)
     
     print(f"Downloading data from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')} ...")
     
@@ -54,8 +54,8 @@ def main():
             # Use Adj Close for analysis to account for dividends and splits
             if 'Adj Close' in tk_data.columns and not tk_data['Adj Close'].dropna().empty:
                 adj_close = tk_data['Adj Close'].dropna()
-                # We want tickers that have sufficient history, say at least 4 years (approx 1000 trading days)
-                if len(adj_close) > 1000:
+                # 降低要求至 1250 天 (約 5 年交易日) 以確保至少有資料
+                if len(adj_close) > 1250:
                     adj_close.name = tk
                     price_df_list.append(adj_close)
                     valid_tickers.append(tk)

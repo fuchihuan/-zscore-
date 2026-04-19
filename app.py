@@ -151,7 +151,7 @@ TAIFEX_FILE = os.path.join(os.path.dirname(__file__), 'taifex_stocks.csv')
 # ============================================================
 @st.cache_data(ttl=3600)
 def load_price_data():
-    """載入已下載的股價資料"""
+    """載入已下載的股價資料 (更新快取)"""
     if not os.path.exists(DATA_FILE):
         return None
     df = pd.read_csv(DATA_FILE, index_col=0, parse_dates=True)
@@ -201,18 +201,36 @@ def calc_trading_cost(price, contracts):
     return tax + commission
 
 
-def find_min_contracts(hedge_ratio):
-    """找最少配對口數"""
-    best_error = float('inf')
+def find_min_contracts(price_s1, price_s2):
+    """找最少配對口數（以實質股價等值平衡為目標，加入口數懲罰）"""
+    target_ratio = price_s2 / price_s1
+    best_score = float('inf')
     best_s1, best_s2 = 1, 1
-    for s2 in range(1, 11):
-        for s1 in range(1, 11):
+    for s2 in range(1, 21):
+        for s1 in range(1, 21):
             ratio = s1 / s2
-            error = abs(ratio - hedge_ratio)
-            if error < best_error:
-                best_error = error
+            error = abs(ratio - target_ratio)
+            # 加入口數懲罰，避免為了極微小的精確率而讓合約口數暴增
+            score = error + (s1 + s2) * 0.015
+            if score < best_score:
+                best_score = score
                 best_s1, best_s2 = s1, s2
     return best_s1, best_s2
+
+
+def calc_max_contracts(price_s1, price_s2, capital, margin_rate=MARGIN_RATE):
+    """根據保證金自動計算最大口數"""
+    c1_base, c2_base = find_min_contracts(price_s1, price_s2)
+    margin_per_unit = (
+        price_s1 * SHARES_PER_CONTRACT * margin_rate * c1_base +
+        price_s2 * SHARES_PER_CONTRACT * margin_rate * c2_base
+    )
+    if margin_per_unit <= 0:
+        return c1_base, c2_base, 1
+    multiplier = int(capital / margin_per_unit)
+    if multiplier == 0:
+        return c1_base, c2_base, 0
+    return c1_base * multiplier, c2_base * multiplier, multiplier
 
 
 def get_third_wednesdays(start_year, end_year):
@@ -232,10 +250,12 @@ def get_third_wednesdays(start_year, end_year):
     return settlement_dates
 
 
-def run_backtest(S1, S2, sym1, sym2, initial_capital, z_entry, z_exit, z_window):
+def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital, 
+                 z_entry, z_exit, z_window, 
+                 size_mode='依保證金上限最大化（預設）', margin_usage_pct=1.0,
+                 run_start_date=None, run_end_date=None):
     """
     執行完整的配對交易保證金回測
-    含：漲跌停剔除、每月第三個禮拜三結算日強制平倉/轉倉
     """
     # 對齊
     common_idx = S1.index.intersection(S2.index)
@@ -259,16 +279,43 @@ def run_backtest(S1, S2, sym1, sym2, initial_capital, z_entry, z_exit, z_window)
     zscore = (spread - spread_mean) / spread_std
     zscore = zscore.dropna()
 
-    # 最少配對口數
-    contracts_s1, contracts_s2 = find_min_contracts(hedge_ratio)
+    # 在產生完指標後，再進行時間切片，確保 2020/1/2 也能立刻有指標數據
+    if run_start_date and run_end_date:
+        zscore = zscore.loc[run_start_date:run_end_date]
+    
+    if zscore.empty:
+        # 回傳空結構，由外部處理
+        return pd.DataFrame(), pd.DataFrame(), {'insufficient_margin_error': True, 'msg': '所選區間內無可用資料或資料長度不足滾動窗口計算！'}
 
     # 回測期起始保證金估算
     start_date = zscore.index[0]
     p1_start = S1[start_date]
     p2_start = S2[start_date]
+
+    usable_capital = initial_capital * margin_usage_pct
+
+    if size_mode == '依保證金上限最大化（預設）':
+        contracts_s1, contracts_s2, multiplier = calc_max_contracts(
+            p1_start, p2_start, usable_capital
+        )
+    else:
+        contracts_s1, contracts_s2 = find_min_contracts(p1_start, p2_start)
+        multiplier = 1
+
     margin_s1 = calc_margin_per_contract(p1_start) * contracts_s1
     margin_s2 = calc_margin_per_contract(p2_start) * contracts_s2
-    total_margin_needed = margin_s1 + margin_s2
+    total_margin_needed_start = margin_s1 + margin_s2
+
+    base_s1, base_s2 = find_min_contracts(p1_start, p2_start)
+    base_margin_s1 = calc_margin_per_contract(p1_start) * base_s1
+    base_margin_s2 = calc_margin_per_contract(p2_start) * base_s2
+    base_margin = base_margin_s1 + base_margin_s2
+
+    # 檢查保證金是否連一組基本口數都下不了
+    insufficient_margin_error = False
+    if base_margin > initial_capital:
+        insufficient_margin_error = True
+        contracts_s1, contracts_s2, multiplier = 0, 0, 0
 
     # 產生結算日集合
     start_year = zscore.index[0].year
@@ -281,6 +328,8 @@ def run_backtest(S1, S2, sym1, sym2, initial_capital, z_entry, z_exit, z_window)
     position = 0
     entry_price_s1 = 0.0
     entry_price_s2 = 0.0
+    entry_date = None
+    entry_zscore = 0.0
     cash = initial_capital
     realized_pnl_total = 0.0
     records = []
@@ -297,12 +346,25 @@ def run_backtest(S1, S2, sym1, sym2, initial_capital, z_entry, z_exit, z_window)
         is_limit = any_limit.get(date, False)
         is_settlement = date.date() in settlement_dates
 
-        margin_s1_today = calc_margin_per_contract(p1) * contracts_s1
-        margin_s2_today = calc_margin_per_contract(p2) * contracts_s2
-        margin_required_today = margin_s1_today + margin_s2_today
+        # 如果目前有持倉，計算現有持倉的所需保證金
+        if position != 0:
+            margin_s1_today = calc_margin_per_contract(p1) * contracts_s1
+            margin_s2_today = calc_margin_per_contract(p2) * contracts_s2
+            margin_required_today = margin_s1_today + margin_s2_today
+        else:
+            margin_required_today = 0
 
         unrealized_pnl = 0.0
         action = ''
+        
+        # 動態決定口數的內部函數
+        def size_trade():
+            if size_mode == '依保證金上限最大化（預設）':
+                c1, c2, _ = calc_max_contracts(p1, p2, cash * margin_usage_pct)
+            else:
+                c1, c2 = find_min_contracts(p1, p2)
+            req = calc_margin_per_contract(p1) * c1 + calc_margin_per_contract(p2) * c2
+            return c1, c2, req
 
         # 計算未實現損益
         if position != 0:
@@ -314,57 +376,80 @@ def run_backtest(S1, S2, sym1, sym2, initial_capital, z_entry, z_exit, z_window)
                 pnl_s1 = (p1 - entry_price_s1) * SHARES_PER_CONTRACT * contracts_s1
             unrealized_pnl = pnl_s1 + pnl_s2
 
+        # 描述函式: 誰做多、誰做空
+        def make_desc(pos_dir):
+            if pos_dir == 1:  # 多Spread = 做多S2 + 做空S1
+                return f'做空{sym1}({name1}) {contracts_s1}口 / 做多{sym2}({name2}) {contracts_s2}口'
+            else:  # 空Spread = 做多S1 + 做空S2
+                return f'做多{sym1}({name1}) {contracts_s1}口 / 做空{sym2}({name2}) {contracts_s2}口'
+
         # =====================================================
         # (A) 結算日後次日重新開倉 (轉倉)
         # =====================================================
         if pending_reopen is not None and position == 0:
+            dyn_c1, dyn_c2, dyn_req = size_trade()
+            
             if is_limit:
                 action = '漲跌停，轉倉開倉延後'
                 skipped_limits += 1
                 # 保持 pending_reopen 到下一日
-            elif cash >= margin_required_today:
+            elif dyn_c1 > 0 and cash >= dyn_req and not insufficient_margin_error:
+                contracts_s1, contracts_s2 = dyn_c1, dyn_c2
+                margin_required_today = dyn_req
                 position = pending_reopen
                 entry_price_s1 = p1
                 entry_price_s2 = p2
+                entry_date = date
+                entry_zscore = z
                 cost = calc_trading_cost(p1, contracts_s1) + calc_trading_cost(p2, contracts_s2)
                 cash -= cost
                 realized_pnl_total -= cost
                 total_roll_cost += cost
                 direction = '多Spread' if position == 1 else '空Spread'
-                action = f'轉倉開倉: {direction} (結算後重新建倉)'
+                desc = make_desc(position)
+                action = f'轉倉開倉: {desc}'
+                direction = '做多配對' if position == 1 else '做空配對'
                 trade_log.append({
-                    '日期': date.strftime('%Y-%m-%d'), '動作': f'轉倉開倉-{direction}',
+                    '日期': date.strftime('%Y-%m-%d'), '動作': f'轉倉開倉({direction})',
+                    '部位描述': desc,
+                    f'{sym1}({name1})多空': '做空' if position == 1 else '做多',
+                    f'{sym2}({name2})多空': '做多' if position == 1 else '做空',
                     f'{sym1}價': round(p1, 2), f'{sym2}價': round(p2, 2),
+                    f'{sym1}口數': contracts_s1, f'{sym2}口數': contracts_s2,
+                    '保證金佔用': round(margin_required_today, 0),
                     'Z-Score': round(z, 2), '交易成本': round(cost, 0), '損益': 0
                 })
                 pending_reopen = None
             else:
-                action = f'轉倉失敗: 保證金不足 (需{margin_required_today:,.0f})'
+                action = f'轉倉失敗: 保證金不足'
                 pending_reopen = None  # 放棄轉倉
         # =====================================================
         # (B) 結算日強制平倉
         # =====================================================
         elif is_settlement and position != 0:
-            # 結算日收盤強制平倉，不管 Z-Score
+            # 結算日收盤強制平倉
             cost = calc_trading_cost(p1, contracts_s1) + calc_trading_cost(p2, contracts_s2)
             net_pnl = unrealized_pnl - cost
             cash += net_pnl
             realized_pnl_total += net_pnl
             total_roll_cost += cost
             settlement_rolls += 1
-            direction = '多Spread' if position == 1 else '空Spread'
+            direction = '做多配對' if position == 1 else '做空配對'
+            desc = make_desc(position)
             action = f'結算平倉: {direction}, 損益={net_pnl:+,.0f}'
             trade_log.append({
-                '日期': date.strftime('%Y-%m-%d'), '動作': f'結算平倉-{direction}',
+                '日期': date.strftime('%Y-%m-%d'), '動作': f'結算平倉({direction})',
+                '部位描述': f"平倉: {desc}",
+                f'{sym1}({name1})多空': '平倉(買回)' if position == 1 else '平倉(賣出)',
+                f'{sym2}({name2})多空': '平倉(賣出)' if position == 1 else '平倉(買回)',
                 f'{sym1}價': round(p1, 2), f'{sym2}價': round(p2, 2),
-                'Z-Score': round(z, 2), '交易成本': round(cost, 0),
+                f'{sym1}口數': contracts_s1, f'{sym2}口數': contracts_s2,
+                '保證金佔用': round(margin_required_today, 0),
+                'Z-Score': round(z, 2),  # 統一名稱，供網頁正常顯示
+                '開倉Z': round(entry_zscore, 2),
+                '交易成本': round(cost, 0),
                 '損益': round(net_pnl, 0)
             })
-            # 判斷是否需要轉倉：Z-Score 仍未回歸，應在次日重新開倉
-            # 原方向為多Spread(position=1)的進場條件是z < -entry，
-            # 若z仍 < z_exit 就應繼續持有 → 次日轉倉
-            # 原方向為空Spread(position=-1)的進場條件是z > entry，
-            # 若z仍 > z_exit 就應繼續持有 → 次日轉倉
             if (position == 1 and z < z_exit) or (position == -1 and z > z_exit):
                 pending_reopen = position  # 記住方向，次日重新開
             else:
@@ -374,50 +459,74 @@ def run_backtest(S1, S2, sym1, sym2, initial_capital, z_entry, z_exit, z_window)
             unrealized_pnl = 0.0
             entry_price_s1 = 0.0
             entry_price_s2 = 0.0
+            entry_date = None
+            entry_zscore = 0.0
         # =====================================================
         # (C) 正常交易邏輯
         # =====================================================
         # Z > +entry 且空手 → 做空 Spread
         elif z > z_entry and position == 0 and pending_reopen is None:
+            dyn_c1, dyn_c2, dyn_req = size_trade()
             if is_limit:
                 action = '漲跌停，跳過開倉'
                 skipped_limits += 1
-            elif cash >= margin_required_today:
+            elif dyn_c1 > 0 and cash >= dyn_req and not insufficient_margin_error:
+                contracts_s1, contracts_s2 = dyn_c1, dyn_c2
+                margin_required_today = dyn_req
                 position = -1
                 entry_price_s1 = p1
                 entry_price_s2 = p2
+                entry_date = date
+                entry_zscore = z
                 cost = calc_trading_cost(p1, contracts_s1) + calc_trading_cost(p2, contracts_s2)
                 cash -= cost
                 realized_pnl_total -= cost
-                action = f'開倉: 空Spread (空{sym2}x{contracts_s2}, 多{sym1}x{contracts_s1})'
+                desc = make_desc(-1)
+                action = f'開倉: {desc}'
                 trade_log.append({
-                    '日期': date.strftime('%Y-%m-%d'), '動作': '開倉-空Spread',
+                    '日期': date.strftime('%Y-%m-%d'), '動作': '開倉(做空配對)',
+                    '部位描述': desc,
+                    f'{sym1}({name1})多空': '做多',
+                    f'{sym2}({name2})多空': '做空',
                     f'{sym1}價': round(p1, 2), f'{sym2}價': round(p2, 2),
+                    f'{sym1}口數': contracts_s1, f'{sym2}口數': contracts_s2,
+                    '保證金佔用': round(margin_required_today, 0),
                     'Z-Score': round(z, 2), '交易成本': round(cost, 0), '損益': 0
                 })
             else:
-                action = f'保證金不足 (需{margin_required_today:,.0f})'
+                action = f'保證金不足'
 
         # Z < -entry 且空手 → 做多 Spread
         elif z < -z_entry and position == 0 and pending_reopen is None:
+            dyn_c1, dyn_c2, dyn_req = size_trade()
             if is_limit:
                 action = '漲跌停，跳過開倉'
                 skipped_limits += 1
-            elif cash >= margin_required_today:
+            elif dyn_c1 > 0 and cash >= dyn_req and not insufficient_margin_error:
+                contracts_s1, contracts_s2 = dyn_c1, dyn_c2
+                margin_required_today = dyn_req
                 position = 1
                 entry_price_s1 = p1
                 entry_price_s2 = p2
+                entry_date = date
+                entry_zscore = z
                 cost = calc_trading_cost(p1, contracts_s1) + calc_trading_cost(p2, contracts_s2)
                 cash -= cost
                 realized_pnl_total -= cost
-                action = f'開倉: 多Spread (多{sym2}x{contracts_s2}, 空{sym1}x{contracts_s1})'
+                desc = make_desc(1)
+                action = f'開倉: {desc}'
                 trade_log.append({
-                    '日期': date.strftime('%Y-%m-%d'), '動作': '開倉-多Spread',
+                    '日期': date.strftime('%Y-%m-%d'), '動作': '開倉(做多配對)',
+                    '部位描述': desc,
+                    f'{sym1}({name1})多空': '做空',
+                    f'{sym2}({name2})多空': '做多',
                     f'{sym1}價': round(p1, 2), f'{sym2}價': round(p2, 2),
+                    f'{sym1}口數': contracts_s1, f'{sym2}口數': contracts_s2,
+                    '保證金佔用': round(margin_required_today, 0),
                     'Z-Score': round(z, 2), '交易成本': round(cost, 0), '損益': 0
                 })
             else:
-                action = f'保證金不足 (需{margin_required_today:,.0f})'
+                action = f'保證金不足'
 
         # Z 穿越 exit 且有持倉 → 平倉
         elif position != 0 and (
@@ -431,18 +540,28 @@ def run_backtest(S1, S2, sym1, sym2, initial_capital, z_entry, z_exit, z_window)
                 net_pnl = unrealized_pnl - cost
                 cash += net_pnl
                 realized_pnl_total += net_pnl
-                direction = '多Spread' if position == 1 else '空Spread'
+                direction = '做多配對' if position == 1 else '做空配對'
+                desc = make_desc(position)
                 action = f'平倉: {direction}, 損益={net_pnl:+,.0f}'
                 trade_log.append({
-                    '日期': date.strftime('%Y-%m-%d'), '動作': f'平倉-{direction}',
+                    '日期': date.strftime('%Y-%m-%d'), '動作': f'平倉({direction})',
+                    '部位描述': f"平倉: {desc}",
+                    f'{sym1}({name1})多空': '平倉(買回)' if position == 1 else '平倉(賣出)',
+                    f'{sym2}({name2})多空': '平倉(賣出)' if position == 1 else '平倉(買回)',
                     f'{sym1}價': round(p1, 2), f'{sym2}價': round(p2, 2),
-                    'Z-Score': round(z, 2), '交易成本': round(cost, 0),
+                    f'{sym1}口數': contracts_s1, f'{sym2}口數': contracts_s2,
+                    '保證金佔用': round(margin_required_today, 0),
+                    'Z-Score': round(z, 2),  # 統一名稱，供網頁正常顯示
+                    '開倉Z': round(entry_zscore, 2),
+                    '交易成本': round(cost, 0),
                     '損益': round(net_pnl, 0)
                 })
                 position = 0
                 unrealized_pnl = 0.0
                 entry_price_s1 = 0.0
                 entry_price_s2 = 0.0
+                entry_date = None
+                entry_zscore = 0.0
 
         # 淨值
         if position != 0:
@@ -464,6 +583,8 @@ def run_backtest(S1, S2, sym1, sym2, initial_capital, z_entry, z_exit, z_window)
             '日期': date,
             f'{sym1}價': p1, f'{sym2}價': p2,
             'Z-Score': z, '持倉': position,
+            f'{sym1}口數': contracts_s1 if position != 0 else 0,
+            f'{sym2}口數': contracts_s2 if position != 0 else 0,
             '未實現損益': unrealized_pnl,
             '累計已實現損益': realized_pnl_total,
             '凍結保證金': frozen_margin,
@@ -478,12 +599,18 @@ def run_backtest(S1, S2, sym1, sym2, initial_capital, z_entry, z_exit, z_window)
     # 統計
     close_trades = df_trades[df_trades['動作'].str.contains('平倉')] if not df_trades.empty else pd.DataFrame()
     stats = {}
+    stats['insufficient_margin_error'] = insufficient_margin_error
+    stats['base_s1'] = base_s1
+    stats['base_s2'] = base_s2
+    stats['base_margin'] = base_margin
     stats['hedge_ratio'] = hedge_ratio
     stats['contracts_s1'] = contracts_s1
     stats['contracts_s2'] = contracts_s2
-    stats['total_margin_needed'] = total_margin_needed
+    stats['multiplier'] = multiplier
+    stats['total_margin_needed'] = base_margin
     stats['margin_s1'] = margin_s1
     stats['margin_s2'] = margin_s2
+    stats['margin_utilization'] = (total_margin_needed_start / initial_capital * 100) if initial_capital > 0 else 0
     stats['p1_start'] = p1_start
     stats['p2_start'] = p2_start
     stats['start_date'] = valid_dates[0]
@@ -492,7 +619,21 @@ def run_backtest(S1, S2, sym1, sym2, initial_capital, z_entry, z_exit, z_window)
     stats['final_equity'] = df_records['帳戶淨值'].iloc[-1]
     stats['total_return'] = df_records['帳戶淨值'].iloc[-1] - initial_capital
     stats['total_return_pct'] = (df_records['帳戶淨值'].iloc[-1] / initial_capital - 1) * 100
-    stats['max_drawdown'] = (df_records['帳戶淨值'].cummax() - df_records['帳戶淨值']).max()
+    
+    # MDD
+    peak = df_records['帳戶淨值'].cummax()
+    drawdown = peak - df_records['帳戶淨值']
+    drawdown_pct = drawdown / peak * 100
+    stats['max_drawdown'] = drawdown.max()
+    stats['max_drawdown_pct'] = drawdown_pct.max()
+
+    # 年化報酬率
+    trading_days = len(df_records)
+    years = trading_days / 252
+    if years > 0 and stats['final_equity'] > 0:
+        stats['annualized_return'] = ((stats['final_equity'] / initial_capital) ** (1 / years) - 1) * 100
+    else:
+        stats['annualized_return'] = 0.0
 
     if not close_trades.empty:
         win = close_trades[close_trades['損益'] > 0]
@@ -601,20 +742,47 @@ def main():
             return
 
         st.markdown("---")
-        st.markdown("### 💰 保證金設定")
+        st.markdown("### 📅 回測期間")
+        import datetime
+        min_date = prices.index.min().date()
+        latest_date = prices.index.max().date()
+        today_date = datetime.date.today()
+        
+        # 預設起點設為 2020-01-02
+        default_start = datetime.date(2020, 1, 2) if datetime.date(2020, 1, 2) >= min_date else min_date
+        
+        col_start, col_end = st.columns(2)
+        with col_start:
+            start_date = st.date_input("開始日期", min_value=min_date, max_value=today_date, value=default_start)
+        with col_end:
+            # 預設終點設為今天
+            end_date = st.date_input("結束日期", min_value=min_date, max_value=today_date, value=today_date)
+
+        st.markdown("---")
+        st.markdown("### 💰 保證金與資金管理")
         initial_capital = st.number_input(
-            "初始保證金 (TWD)",
+            "初始總保證金 (TWD)",
             min_value=10000,
             max_value=100000000,
-            value=200000,
-            step=10000,
+            value=1000000,
+            step=50000,
             format="%d"
         )
+        
+        st.markdown("### 💰 資金滿載設定")
+        size_mode = st.radio("資金佈局模式", 
+                             options=['依保證金上限最大化（預設）', '最少配對口數 (僅基本單位)'],
+                             index=0,
+                             help="選擇是否要讓系統自動把資金運用到極限")
+        
+        margin_usage_pct = 1.0
+        if size_mode == '依保證金上限最大化（預設）':
+            margin_usage_pct = st.slider("最高保證金利用率 (%)", 0, 100, 100, 5, help="限制這筆資金最高只能被利用的比例") / 100.0
 
         st.markdown("---")
         st.markdown("### 📐 Z-Score 參數")
-        z_entry = st.slider("開倉閾值 (|Z| >)", 1.0, 4.0, 2.0, 0.1)
-        z_exit = st.slider("平倉閾值 (Z 回歸)", -1.0, 1.0, 0.0, 0.1)
+        z_entry = st.slider("開倉閾值 (Z絕對值, 進場 ±Z)", -3.0, 3.0, 2.0, 0.1)
+        z_exit = st.slider("平倉閾值 (Z 回歸)", -3.0, 3.0, 0.0, 0.1)
         z_window = st.slider("滾動窗口 (天)", 20, 120, 60, 5)
 
         st.markdown("---")
@@ -636,13 +804,37 @@ def main():
     # 主面板: 執行結果
     # ============================================================
     if run_btn:
-        S1 = prices[sym1]
-        S2 = prices[sym2]
+        S1 = prices[sym1].dropna()
+        S2 = prices[sym2].dropna()
+
+        # 確保有共同日期以供模型訓練 (需要全局數據)
+        common_idx = S1.index.intersection(S2.index)
+        if len(common_idx) < 120:  # 至少需要兩倍滾動窗口的資料量
+            st.error(f"這兩檔標的全局共同有效的交易日過少 ({len(common_idx)} 天)，無法建立計算模型！")
+            return
+            
+        S1 = S1[common_idx]
+        S2 = S2[common_idx]
+
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
 
         with st.spinner("正在執行回測分析..."):
+            name1 = name_map.get(sym1.replace('.TW', '').replace('.TWO', ''), '')
+            name2 = name_map.get(sym2.replace('.TW', '').replace('.TWO', ''), '')
             df_records, df_trades, stats = run_backtest(
-                S1, S2, sym1, sym2, initial_capital, z_entry, z_exit, z_window
+                S1, S2, sym1, sym2, name1, name2, initial_capital, 
+                z_entry, z_exit, z_window, 
+                size_mode=size_mode, margin_usage_pct=margin_usage_pct,
+                run_start_date=start_str, run_end_date=end_str
             )
+
+        if stats.get('insufficient_margin_error', False):
+            if 'msg' in stats:
+                st.error(f"❌ **回測執行攔截：**\n\n{stats['msg']}")
+            else:
+                st.error(f"❌ **保證金不足無法下單！**\n\n您設定的可用保證金 ({initial_capital * margin_usage_pct:,.0f} 元) 不足以下單即使是最少的 {stats.get('base_s1',0)}口/{stats.get('base_s2',0)}口 (需 {stats.get('base_margin',0):,.0f} 元)。請增加資金或選擇較低價標的。")
+            return
 
         # --- 保證金計算摘要 ---
         st.markdown("## 📋 配對口數與保證金計算")
@@ -660,25 +852,25 @@ def main():
         with col2:
             st.markdown(f"""
             <div class="metric-card">
-                <div class="label">配對口數</div>
-                <div class="value">{sym1}×{stats['contracts_s1']} / {sym2}×{stats['contracts_s2']}</div>
+                <div class="label">最小等張口數需求</div>
+                <div class="value">{sym1}×{stats['base_s1']} : {sym2}×{stats['base_s2']}</div>
             </div>
             """, unsafe_allow_html=True)
 
         with col3:
             st.markdown(f"""
             <div class="metric-card">
-                <div class="label">最少開倉保證金</div>
-                <div class="value">{stats['total_margin_needed']:,.0f}</div>
+                <div class="label">最低一組基本保證金</div>
+                <div class="value">{stats['base_margin']:,.0f}</div>
             </div>
             """, unsafe_allow_html=True)
 
         with col4:
-            pct_used = stats['total_margin_needed'] / initial_capital * 100
-            color_cls = 'positive' if pct_used < 80 else 'negative'
+            pct_used = stats['margin_utilization']
+            color_cls = 'positive' if pct_used < 95 else 'negative'
             st.markdown(f"""
             <div class="metric-card">
-                <div class="label">保證金使用率</div>
+                <div class="label">保證金利用率</div>
                 <div class="value {color_cls}">{pct_used:.1f}%</div>
             </div>
             """, unsafe_allow_html=True)
@@ -690,20 +882,28 @@ def main():
                 st.markdown(f"""
                 **{sym1}** (起始價: {stats['p1_start']:.2f})
                 - 合約價值 = {stats['p1_start']:.2f} × {SHARES_PER_CONTRACT:,} = **{calc_contract_value(stats['p1_start']):,.0f}**
-                - {stats['contracts_s1']} 口保證金 = {calc_contract_value(stats['p1_start']):,.0f} × {MARGIN_RATE*100:.1f}% × {stats['contracts_s1']} = **{stats['margin_s1']:,.0f}**
+                - {stats['base_s1']} 口基本保證金 = {calc_contract_value(stats['p1_start']):,.0f} × {MARGIN_RATE*100:.1f}% × {stats['base_s1']} = **{stats['margin_s1']/max(1, stats['multiplier']):,.0f}**
                 """)
             with calc_col2:
                 st.markdown(f"""
                 **{sym2}** (起始價: {stats['p2_start']:.2f})
                 - 合約價值 = {stats['p2_start']:.2f} × {SHARES_PER_CONTRACT:,} = **{calc_contract_value(stats['p2_start']):,.0f}**
-                - {stats['contracts_s2']} 口保證金 = {calc_contract_value(stats['p2_start']):,.0f} × {MARGIN_RATE*100:.1f}% × {stats['contracts_s2']} = **{stats['margin_s2']:,.0f}**
+                - {stats['base_s2']} 口基本保證金 = {calc_contract_value(stats['p2_start']):,.0f} × {MARGIN_RATE*100:.1f}% × {stats['base_s2']} = **{stats['margin_s2']/max(1, stats['multiplier']):,.0f}**
                 """)
+            st.markdown(f"*(註：上述為回測期初起算時之一倍基本組合。實單會隨著帳戶總資金動態擴大倍數)*")
 
-        if stats['total_margin_needed'] > initial_capital:
+        if stats['base_margin'] > initial_capital:
             st.markdown(f"""
             <div class="warning-box">
-                ⚠️ 初始資金 {initial_capital:,} 元不足以開倉（需 {stats['total_margin_needed']:,.0f} 元）！
+                ⚠️ 初始資金 {initial_capital:,} 元不足以開出一組基本配對（需 {stats['base_margin']:,.0f} 元）！
                 請提高初始保證金或選擇較低價的標的。
+            </div>
+            """, unsafe_allow_html=True)
+        elif stats.get('multiplier', 0) < 1 and size_mode == '依保證金上限最大化（預設）':
+            st.markdown(f"""
+            <div class="warning-box">
+                ⚠️ 您設定的保證金利用率極限較低，分配到的起步資金不足以負荷一組配對（需 {stats['base_margin']:,.0f} 元）。
+                回測在資金或股價達標前可能會保持空手。
             </div>
             """, unsafe_allow_html=True)
 
@@ -730,8 +930,8 @@ def main():
         with m3:
             st.markdown(f"""
             <div class="metric-card">
-                <div class="label">最終淨值</div>
-                <div class="value">{stats['final_equity']:,.0f}</div>
+                <div class="label">年化報酬率</div>
+                <div class="value {'positive' if stats['annualized_return'] >= 0 else 'negative'}">{stats['annualized_return']:+.1f}%</div>
             </div>
             """, unsafe_allow_html=True)
         with m4:
@@ -752,8 +952,8 @@ def main():
         with m6:
             st.markdown(f"""
             <div class="metric-card">
-                <div class="label">最大回撤</div>
-                <div class="value negative">{stats['max_drawdown']:,.0f}</div>
+                <div class="label">最大回撤 MDD</div>
+                <div class="value negative">{stats['max_drawdown_pct']:.1f}%</div>
             </div>
             """, unsafe_allow_html=True)
 
