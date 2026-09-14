@@ -151,17 +151,84 @@ TAIFEX_FILE = os.path.join(os.path.dirname(__file__), 'taifex_stocks.csv')
 # ============================================================
 @st.cache_data(ttl=3600)
 def load_price_data():
-    """載入已下載的股價資料 (更新快取)"""
+    """載入已下載的股價資料並自動更新到最新，同時抓取全球資產"""
+    import yfinance as yf
+    import datetime
+    
     if not os.path.exists(DATA_FILE):
         return None
+        
+    # 1. 載入本地台股資料庫
     df = pd.read_csv(DATA_FILE, index_col=0, parse_dates=True)
     df = df.dropna(axis=1, thresh=len(df) * 0.8)
+    
+    # 2. 自動更新台股資料到最新日期
+    last_date = df.index[-1]
+    today = datetime.datetime.now()
+    if last_date.date() < today.date() - datetime.timedelta(days=1):
+        try:
+            start_str = (last_date + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+            tw_tickers = [c for c in df.columns if '.TW' in c]
+            if tw_tickers:
+                new_data = yf.download(tw_tickers, start=start_str, group_by='ticker', auto_adjust=False, threads=True, progress=False)
+                new_df_list = []
+                if isinstance(new_data.columns, pd.MultiIndex):
+                    for tk in tw_tickers:
+                        if tk in new_data:
+                            tk_data = new_data[tk]
+                            if 'Adj Close' in tk_data:
+                                series = tk_data['Adj Close'].dropna()
+                                series.name = tk
+                                new_df_list.append(series)
+                if new_df_list:
+                    new_df = pd.concat(new_df_list, axis=1)
+                    df = pd.concat([df, new_df])
+        except Exception as e:
+            print(f"Error updating TW data: {e}")
+
+    # 3. 抓取全球資產資料 (從 2020-01-01 開始)
+    global_symbols = {
+        'NQ=F': '小納斯達克期貨', 'NIY=F': '日經225期貨', 'ES=F': 'S&P500期貨', 'YM=F': '小道瓊期貨',
+        '^VIX': 'VIX恐慌指數', 'GC=F': '黃金期貨', 'CL=F': '輕原油期貨', 'SI=F': '白銀期貨', 'HG=F': '銅期貨',
+        'EURUSD=X': '歐元/美元', 'USDJPY=X': '美元/日圓', 'GBPUSD=X': '英鎊/美元', 'AUDUSD=X': '澳幣/美元',
+        'BTC-USD': '比特幣', 'ETH-USD': '以太幣'
+    }
+    try:
+        global_data = yf.download(
+            list(global_symbols.keys()),
+            start='2020-01-01',
+            group_by='ticker',
+            auto_adjust=False,
+            threads=True,
+            progress=False
+        )
+        global_df_list = []
+        if isinstance(global_data.columns, pd.MultiIndex):
+            for tk in global_symbols.keys():
+                if tk in global_data:
+                    tk_data = global_data[tk]
+                    if 'Adj Close' in tk_data:
+                        series = tk_data['Adj Close'].dropna()
+                        series.name = tk
+                        global_df_list.append(series)
+        else:
+            if 'Adj Close' in global_data:
+                series = global_data['Adj Close'].dropna()
+                series.name = list(global_symbols.keys())[0]
+                global_df_list.append(series)
+        
+        if global_df_list:
+            global_df = pd.concat(global_df_list, axis=1)
+            # 合併到台股資料
+            df = df.join(global_df, how='outer')
+    except Exception as e:
+        print(f"Error fetching global data: {e}")
+
     df = df.ffill().bfill()
     return df
 
-
 def get_ticker_names():
-    """嘗試取得代號與公司名對照表，並附加產業別"""
+    """嘗試取得代號與公司名對照表，並附加產業別與全球資產"""
     mapping = {}
     if os.path.exists(TAIFEX_FILE):
         try:
@@ -173,7 +240,7 @@ def get_ticker_names():
                     mapping[code] = name
         except:
             pass
-            
+
     # 附加產業別
     industry_df = get_industry_data()
     if industry_df is not None:
@@ -189,7 +256,27 @@ def get_ticker_names():
                     mapping[code] = str(ind)
         except:
             pass
-            
+
+    # 加入全球資產對應
+    global_assets = {
+        'NQ=F': '小納斯達克期貨 | 全球指數',
+        'NIY=F': '日經225期貨 | 全球指數',
+        'ES=F': 'S&P500期貨 | 全球指數',
+        'YM=F': '小道瓊期貨 | 全球指數',
+        '^VIX': 'VIX恐慌指數 | 全球指數',
+        'GC=F': '黃金期貨 | 大宗商品',
+        'CL=F': '輕原油期貨 | 大宗商品',
+        'SI=F': '白銀期貨 | 大宗商品',
+        'HG=F': '銅期貨 | 大宗商品',
+        'EURUSD=X': '歐元/美元 | 外匯',
+        'USDJPY=X': '美元/日圓 | 外匯',
+        'GBPUSD=X': '英鎊/美元 | 外匯',
+        'AUDUSD=X': '澳幣/美元 | 外匯',
+        'BTC-USD': '比特幣 | 加密貨幣',
+        'ETH-USD': '以太幣 | 加密貨幣'
+    }
+    mapping.update(global_assets)
+
     return mapping
 
 
