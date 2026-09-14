@@ -4,3 +4,7 @@ numpy
 plotly
 statsmodels
 yfinance
+scipy
+arch
+pykalman
+copulas

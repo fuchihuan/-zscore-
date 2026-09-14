@@ -161,48 +161,18 @@ def load_price_data():
 
 
 def get_ticker_names():
-    """嘗試取得代號與公司名對照表，並附加產業別"""
+    """嘗試取得代號與公司名對照表"""
     mapping = {}
     if os.path.exists(TAIFEX_FILE):
         try:
-            taifex_df = pd.read_csv(TAIFEX_FILE, encoding='utf-8-sig')
-            for _, row in taifex_df.iterrows():
-                code = str(row.iloc[2]).strip()
-                name = str(row.iloc[3]).strip()
-                if code != 'nan' and name != 'nan' and code:
-                    mapping[code] = name
+            taifex_df = pd.read_csv(TAIFEX_FILE)
+            codes = taifex_df.iloc[:, 2].dropna().astype(str).tolist()
+            names = taifex_df.iloc[:, 3].dropna().astype(str).tolist()
+            for code, name in zip(codes, names):
+                mapping[code.strip()] = name.strip()
         except:
             pass
-            
-    # 附加產業別
-    industry_df = get_industry_data()
-    if industry_df is not None:
-        try:
-            for tk, row in industry_df.iterrows():
-                ind = row.get('Industry')
-                if pd.isna(ind) or not str(ind).strip():
-                    continue
-                code = str(tk).replace('.TW', '').replace('.TWO', '')
-                if code in mapping:
-                    mapping[code] = f"{mapping[code]} | {ind}"
-                else:
-                    mapping[code] = str(ind)
-        except:
-            pass
-            
     return mapping
-
-
-@st.cache_data(ttl=3600)
-def get_industry_data():
-    """嘗試取得產業與主要業務資料"""
-    industry_file = os.path.join(os.path.dirname(__file__), 'industry_data.csv')
-    if os.path.exists(industry_file):
-        try:
-            return pd.read_csv(industry_file).set_index('Ticker')
-        except:
-            return None
-    return None
 
 
 def detect_limit_days(series):
@@ -280,78 +250,11 @@ def get_third_wednesdays(start_year, end_year):
     return settlement_dates
 
 
-def calculate_half_life(spread):
-    """計算 Ornstein-Uhlenbeck (OU) 模型的收斂半衰期"""
-    spread_lag = spread.shift(1).dropna()
-    spread_diff = spread.diff().dropna()
-    
-    df = pd.DataFrame({'diff': spread_diff, 'lag': spread_lag}).dropna()
-    if df.empty:
-        return float('inf')
-        
-    X = sm.add_constant(df['lag'])
-    Y = df['diff']
-    
-    try:
-        model = sm.OLS(Y, X).fit()
-        b = model.params['lag']
-        
-        # 判斷是否均值回歸 (b 必須小於 0)
-        if b >= 0:
-            return float('inf')
-            
-        half_life = -np.log(2) / b
-        return half_life
-    except:
-        return float('inf')
-
-
-def run_kalman_filter(Y, X, trans_cov):
-    """
-    簡單的一維量測、二維狀態 Kalman Filter 實作
-    狀態變數：[alpha, beta]
-    量測方程式：Y_t = alpha_t + beta_t * X_t + v_t
-    狀態方程式：[alpha_t, beta_t] = [alpha_{t-1}, beta_{t-1}] + w_t
-    """
-    n = len(Y)
-    state_mean = np.zeros((n, 2))
-    state_cov = np.zeros((n, 2, 2))
-    
-    # 初始化
-    state_mean[0] = [0, 1] # 假設初始 alpha=0, beta=1
-    state_cov[0] = np.eye(2)
-    
-    # 轉移矩陣 (Identity)
-    F = np.eye(2)
-    # 狀態雜訊共變異數 (Q)
-    Q = np.eye(2) * trans_cov
-    # 觀測雜訊變異數 (R)
-    R = 1e-3
-    
-    for t in range(1, n):
-        # 1. 預測 (Predict)
-        pred_mean = state_mean[t-1]
-        pred_cov = state_cov[t-1] + Q
-        
-        # 2. 更新 (Update)
-        H = np.array([[1, X.iloc[t]]]) # 觀測矩陣
-        residual = Y.iloc[t] - (H @ pred_mean)[0]
-        S = H @ pred_cov @ H.T + R
-        K = pred_cov @ H.T @ np.linalg.inv(S)
-        
-        state_mean[t] = pred_mean + (K * residual).flatten()
-        state_cov[t] = (np.eye(2) - K @ H) @ pred_cov
-        
-    return pd.DataFrame(state_mean, index=Y.index, columns=['alpha', 'beta'])
-
 
 def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital, 
-                 z_entry, z_exit, z_window, 
+                 model_type, model_params, 
                  size_mode='依保證金上限最大化（預設）', margin_usage_pct=1.0,
                  run_start_date=None, run_end_date=None, advanced_params=None):
-    """
-    執行完整的配對交易保證金回測
-    """
     if advanced_params is None:
         advanced_params = {}
 
@@ -365,87 +268,28 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     limit_s2 = detect_limit_days(S2)
     any_limit = limit_s1 | limit_s2
 
-    # 價格轉換
-    use_log = advanced_params.get('use_log_price', False)
-    if use_log:
-        M1 = np.log(S1)
-        M2 = np.log(S2)
-    else:
-        M1 = S1.copy()
-        M2 = S2.copy()
+    from advanced_models import get_zscore_signals, get_ou_signals, get_garch_signals, get_kalman_filter_signals, get_copula_signals
 
-    # 計算動態或靜態避險比率
-    use_kalman = advanced_params.get('use_kalman', False)
-    if use_kalman:
-        trans_cov = advanced_params.get('kalman_trans_cov', 1e-5)
-        kalman_states = run_kalman_filter(M2, M1, trans_cov)
-        hedge_ratio_series = kalman_states['beta']
-        spread = M2 - (kalman_states['alpha'] + hedge_ratio_series * M1)
-        # 用於 stats 的靜態紀錄 (取最後一天)
-        static_hedge_ratio = hedge_ratio_series.iloc[-1]
-    else:
-        X = sm.add_constant(M1)
-        model = sm.OLS(M2, X).fit()
-        static_hedge_ratio = model.params[sym1]
-        hedge_ratio_series = pd.Series(static_hedge_ratio, index=M1.index)
-        spread = M2 - static_hedge_ratio * M1
+    if model_type == 'Z-Score (標準)':
+        signal_df = get_zscore_signals(S1, S2, model_params.get('z_entry', 2.0), model_params.get('z_exit', 0.0), model_params.get('z_window', 60))
+    elif model_type == 'OU 過程 (動態邊界)':
+        signal_df = get_ou_signals(S1, S2, model_params.get('z_window', 60))
+    elif model_type == '共整合 + GARCH':
+        signal_df = get_garch_signals(S1, S2, model_params.get('z_window', 60), model_params.get('z_entry', 2.0), model_params.get('z_exit', 0.0))
+    elif model_type == '卡爾曼濾波 (動態對沖比例)':
+        signal_df = get_kalman_filter_signals(S1, S2, model_params.get('z_window', 60), model_params.get('z_entry', 2.0), model_params.get('z_exit', 0.0))
+    elif model_type == 'Copula (CMPI 機率)':
+        signal_df = get_copula_signals(S1, S2, model_params.get('z_window', 60), model_params.get('prob_threshold', 0.95))
 
-    # Spread & Z-Score
-    spread_mean = spread.rolling(window=z_window).mean()
-    use_ewma = advanced_params.get('use_ewma_z', False)
-    if use_ewma:
-        span = advanced_params.get('ewma_span', 20)
-        spread_std = spread.ewm(span=span).std()
-    else:
-        spread_std = spread.rolling(window=z_window).std()
-        
-    zscore = (spread - spread_mean) / spread_std
-    zscore = zscore.dropna()
-
-    # 在產生完指標後，再進行時間切片，確保 2020/1/2 也能立刻有指標數據
-    if run_start_date and run_end_date:
-        zscore = zscore.loc[run_start_date:run_end_date]
-    
-    if zscore.empty:
-        # 回傳空結構，由外部處理
-        return pd.DataFrame(), pd.DataFrame(), {'insufficient_margin_error': True, 'msg': '所選區間內無可用資料或資料長度不足滾動窗口計算！'}
-
-    # 回測期起始保證金估算
-    start_date = zscore.index[0]
-    p1_start = S1[start_date]
-    p2_start = S2[start_date]
-
-    usable_capital = initial_capital * margin_usage_pct
-
-    if size_mode == '依保證金上限最大化（預設）':
-        contracts_s1, contracts_s2, multiplier = calc_max_contracts(
-            p1_start, p2_start, usable_capital
-        )
-    else:
-        contracts_s1, contracts_s2 = find_min_contracts(p1_start, p2_start)
-        multiplier = 1
-
-    margin_s1 = calc_margin_per_contract(p1_start) * contracts_s1
-    margin_s2 = calc_margin_per_contract(p2_start) * contracts_s2
-    total_margin_needed_start = margin_s1 + margin_s2
-
-    base_s1, base_s2 = find_min_contracts(p1_start, p2_start)
-    base_margin_s1 = calc_margin_per_contract(p1_start) * base_s1
-    base_margin_s2 = calc_margin_per_contract(p2_start) * base_s2
-    base_margin = base_margin_s1 + base_margin_s2
-
-    # 檢查保證金是否連一組基本口數都下不了
-    insufficient_margin_error = False
-    if base_margin > initial_capital:
-        insufficient_margin_error = True
-        contracts_s1, contracts_s2, multiplier = 0, 0, 0
-
-    # 產生結算日集合
-    start_year = zscore.index[0].year
-    end_year = zscore.index[-1].year
-    settlement_dates = get_third_wednesdays(start_year, end_year)
+    if signal_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), {'insufficient_margin_error': True, 'msg': '資料不足以計算模型！'}
 
     # 預先計算進階濾波 Mask
+    zscore = signal_df['Indicator']
+    spread = signal_df['Spread']
+    hedge_ratio_series = pd.Series(signal_df['Hedge_Ratio'], index=zscore.index) if isinstance(signal_df.get('Hedge_Ratio'), (int, float, np.float64, np.float32)) else signal_df.get('Hedge_Ratio', pd.Series(1.0, index=zscore.index))
+    
+    import numpy as np
     ou_pass_mask = pd.Series(True, index=zscore.index)
     beta_trans_mask = pd.Series(False, index=zscore.index)
     roll_hl_series = pd.Series(np.inf, index=zscore.index)
@@ -487,22 +331,63 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         amp = slope_short.abs() > (slope_mid.abs() * 2)
         beta_trans_mask = same_dir & amp
 
-    # --- 逐日模擬 ---
+
+    # 時間切片
+    if run_start_date and run_end_date:
+        signal_df = signal_df.loc[run_start_date:run_end_date]
+        zscore = zscore.loc[run_start_date:run_end_date]
+        ou_pass_mask = ou_pass_mask.loc[run_start_date:run_end_date]
+        beta_trans_mask = beta_trans_mask.loc[run_start_date:run_end_date]
+        roll_hl_series = roll_hl_series.loc[run_start_date:run_end_date]
+        roll_r2_series = roll_r2_series.loc[run_start_date:run_end_date]
+    
+    if signal_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), {'insufficient_margin_error': True, 'msg': '所選區間內無可用資料或資料長度不足滾動窗口計算！'}
+
+    # 回測期起始保證金估算
+    start_date = zscore.index[0]
+    p1_start = S1[start_date]
+    p2_start = S2[start_date]
+
+    usable_capital = initial_capital * margin_usage_pct
+
+    if size_mode == '依保證金上限最大化（預設）':
+        contracts_s1, contracts_s2, multiplier = calc_max_contracts(
+            p1_start, p2_start, usable_capital
+        )
+    else:
+        contracts_s1, contracts_s2 = find_min_contracts(p1_start, p2_start)
+        multiplier = 1
+
+    margin_s1 = calc_margin_per_contract(p1_start) * contracts_s1
+    margin_s2 = calc_margin_per_contract(p2_start) * contracts_s2
+    total_margin_needed_start = margin_s1 + margin_s2
+
+    base_s1, base_s2 = find_min_contracts(p1_start, p2_start)
+    base_margin_s1 = calc_margin_per_contract(p1_start) * base_s1
+    base_margin_s2 = calc_margin_per_contract(p2_start) * base_s2
+    base_margin = base_margin_s1 + base_margin_s2
+
+    insufficient_margin_error = False
+    if base_margin > initial_capital:
+        insufficient_margin_error = True
+        contracts_s1, contracts_s2, multiplier = 0, 0, 0
+
+    start_year = zscore.index[0].year
+    end_year = zscore.index[-1].year
+    settlement_dates = get_third_wednesdays(start_year, end_year)
+
     valid_dates = zscore.index
     dates_list = list(valid_dates)
     
     use_grid = advanced_params.get('use_grid', False)
     grid_levels = advanced_params.get('grid_levels', [])
     
-    # 支援向下相容（如果關閉網格模式）
     if not use_grid:
-        z_entry = advanced_params.get('z_entry', 2.0)
-        z_exit = advanced_params.get('z_exit', 0.0)
         grid_levels = [{
-            'id': 1, 'entry_z': z_entry, 'tp_z': z_exit, 'sl_z': 999.0, 'reentry_z': 999.0, 'pairs': 1
+            'id': 1, 'pairs': 1
         }]
 
-    # 初始化每一層網格的狀態
     grid_states = []
     for g in grid_levels:
         grid_states.append({
@@ -527,7 +412,6 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     settlement_rolls = 0
     total_roll_cost = 0.0
     
-    # 動態決定口數的內部函數
     def get_trade_size(p1, p2, pairs, available_cash):
         if pairs == -1 or size_mode == '依保證金上限最大化（預設）':
             c1, c2, _ = calc_max_contracts(p1, p2, available_cash)
@@ -552,18 +436,23 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         is_settlement = date.date() in settlement_dates
         ou_pass = ou_pass_mask[date]
         beta_trans = beta_trans_mask[date]
+        
+        # 讀取當天動態邊界
+        dyn_upper = signal_df['Upper_Bound'].loc[date]
+        dyn_lower = signal_df['Lower_Bound'].loc[date]
+        dyn_exit_upper = signal_df['Exit_Upper'].loc[date]
+        dyn_exit_lower = signal_df['Exit_Lower'].loc[date]
 
         unrealized_pnl = 0.0
         margin_required_today = 0.0
         
-        # 1. 總結當前持有狀態 (計算總未實現損益與保證金)
         total_position = 0
         total_c1 = 0
         total_c2 = 0
         for state in grid_states:
             if state['is_active']:
                 pos = state['direction']
-                total_position = pos # 簡單標記方向
+                total_position = pos
                 total_c1 += state['c1']
                 total_c2 += state['c2']
                 
@@ -655,9 +544,18 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                     
                     use_smart_roll = advanced_params.get('use_smart_roll', False)
                     smart_roll_z = advanced_params.get('smart_roll_z', 1.0)
+                    
+                    if use_grid:
+                        tp_z = params['tp_z']
+                        is_converged = (pos == 1 and z >= tp_z) or (pos == -1 and z <= -tp_z)
+                    else:
+                        is_converged = (pos == 1 and z >= dyn_exit_upper) or (pos == -1 and z <= dyn_exit_lower)
+                        
                     if use_smart_roll and net_pnl > 0 and abs(z) <= smart_roll_z:
                         state['pending_reopen_dir'] = 0
                         action += f" (防呆不再建倉)"
+                    elif is_converged:
+                        state['pending_reopen_dir'] = 0
                     else:
                         state['pending_reopen_dir'] = pos
                         
@@ -669,8 +567,13 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                 if state['is_active']:
                     pos = state['direction']
                     params = state['params']
-                    hit_tp = (pos == 1 and z >= params['tp_z']) or (pos == -1 and z <= -params['tp_z'])
-                    hit_sl = (pos == 1 and z <= -params['sl_z']) or (pos == -1 and z >= params['sl_z'])
+                    
+                    if use_grid:
+                        hit_tp = (pos == 1 and z >= params['tp_z']) or (pos == -1 and z <= -params['tp_z'])
+                        hit_sl = (pos == 1 and z <= -params['sl_z']) or (pos == -1 and z >= params['sl_z'])
+                    else:
+                        hit_tp = (pos == 1 and z >= dyn_exit_upper) or (pos == -1 and z <= dyn_exit_lower)
+                        hit_sl = False 
                     
                     if hit_tp or hit_sl:
                         if is_limit:
@@ -712,19 +615,29 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
             for state in grid_states:
                 if state['is_stopped_out']:
                     params = state['params']
-                    if abs(z) <= params['reentry_z']:
+                    if use_grid:
+                        if abs(z) <= params['reentry_z']:
+                            state['is_stopped_out'] = False
+                            action += f" [網格{params['id']}] Z分數回落解除冷卻 "
+                    else:
                         state['is_stopped_out'] = False
-                        action += f" [網格{params['id']}] Z分數回落解除冷卻 "
 
             # 6. 正常開倉 (Entry)
             for state in grid_states:
                 if not state['is_active'] and not state['is_stopped_out'] and state['pending_reopen_dir'] == 0:
                     params = state['params']
                     enter_dir = 0
-                    if z >= params['entry_z']:
-                        enter_dir = -1
-                    elif z <= -params['entry_z']:
-                        enter_dir = 1
+                    
+                    if use_grid:
+                        if z >= params['entry_z']:
+                            enter_dir = -1
+                        elif z <= -params['entry_z']:
+                            enter_dir = 1
+                    else:
+                        if z > dyn_upper:
+                            enter_dir = -1
+                        elif z < dyn_lower:
+                            enter_dir = 1
                         
                     if enter_dir != 0:
                         available = cash * margin_usage_pct if total_position == 0 else cash
@@ -777,6 +690,10 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
             '日期': date,
             f'{sym1}價': p1, f'{sym2}價': p2,
             'Z-Score': z, '持倉': total_position,
+            'Upper_Bound': dyn_upper if not use_grid else np.nan,
+            'Lower_Bound': dyn_lower if not use_grid else np.nan,
+            'Exit_Upper': dyn_exit_upper if not use_grid else np.nan,
+            'Exit_Lower': dyn_exit_lower if not use_grid else np.nan,
             f'{sym1}口數': sum(s['c1'] for s in grid_states if s['is_active']),
             f'{sym2}口數': sum(s['c2'] for s in grid_states if s['is_active']),
             '未實現損益': unrealized_pnl,
@@ -784,7 +701,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
             '凍結保證金': frozen_margin,
             '帳戶淨值': equity,
             '動作': action,
-            'Beta': _hr[date],
+            'Beta': _hr[date] if advanced_params.get('use_beta_transition', False) else np.nan,
             'OU_HalfLife': roll_hl_series[date] if advanced_params.get('use_ou_filter', False) else np.nan,
             'OU_R2': roll_r2_series[date] if advanced_params.get('use_ou_filter', False) else np.nan
         })
@@ -793,14 +710,13 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     df_records.set_index('日期', inplace=True)
     df_trades = pd.DataFrame(trade_log)
 
-    # 統計
     close_trades = df_trades[df_trades['動作'].str.contains('平倉')] if not df_trades.empty else pd.DataFrame()
     stats = {}
     stats['insufficient_margin_error'] = insufficient_margin_error
     stats['base_s1'] = base_s1
     stats['base_s2'] = base_s2
     stats['base_margin'] = base_margin
-    stats['hedge_ratio'] = static_hedge_ratio
+    stats['hedge_ratio'] = signal_df['Hedge_Ratio'].iloc[-1] if not signal_df.empty else 0
     stats['contracts_s1'] = contracts_s1
     stats['contracts_s2'] = contracts_s2
     stats['multiplier'] = multiplier
@@ -817,17 +733,12 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     stats['total_return'] = df_records['帳戶淨值'].iloc[-1] - initial_capital
     stats['total_return_pct'] = (df_records['帳戶淨值'].iloc[-1] / initial_capital - 1) * 100
     
-    # 計算收斂半衰期
-    stats['half_life'] = calculate_half_life(spread)
-    
-    # MDD
     peak = df_records['帳戶淨值'].cummax()
     drawdown = peak - df_records['帳戶淨值']
     drawdown_pct = drawdown / peak * 100
     stats['max_drawdown'] = drawdown.max()
     stats['max_drawdown_pct'] = drawdown_pct.max()
 
-    # 年化報酬率
     trading_days = len(df_records)
     years = trading_days / 252
     if years > 0 and stats['final_equity'] > 0:
@@ -858,7 +769,6 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     stats['settlement_rolls'] = settlement_rolls
     stats['total_roll_cost'] = total_roll_cost
 
-    # 持倉期間保證金
     margin_when_holding = df_records[df_records['持倉'] != 0]['凍結保證金']
     if not margin_when_holding.empty:
         stats['min_margin'] = margin_when_holding.min()
@@ -869,7 +779,6 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         stats['max_margin'] = 0
         stats['avg_margin'] = 0
 
-    # 共整合 p-value
     try:
         _, pvalue, _ = coint(S1[common_idx], S2[common_idx])
         stats['coint_pvalue'] = pvalue
@@ -977,28 +886,33 @@ def main():
         
         margin_usage_pct = 1.0
         if size_mode == '依保證金上限最大化（預設）':
-            margin_usage_pct = st.slider("最高保證金利用率 (%)", 0, 100, 30, 5, help="限制這筆資金最高只能被利用的比例") / 100.0
+            margin_usage_pct = st.slider("最高保證金利用率 (%)", 0, 100, 100, 5, help="限制這筆資金最高只能被利用的比例") / 100.0
 
         st.markdown("---")
-        st.markdown("### 📐 Z-Score 參數")
-        z_entry = st.slider("開倉閾值 (Z絕對值, 進場 ±Z)", -3.0, 3.0, 2.0, 0.1)
-        z_exit = st.slider("平倉閾值 (Z 回歸)", -3.0, 3.0, 0.0, 0.1)
-        z_window = st.slider("滾動窗口 (天)", 20, 120, 60, 5)
-
-        st.markdown("---")
-        st.markdown("### 🔬 進階濾波與統計模型參數")
-        use_log_price = st.toggle("啟用對數價格 (Log Price)", value=False, help="將兩檔股價取自然對數(ln)。\n👉 影響：會將資產間的比例關係轉為加法關係，使價差(Spread)分佈更接近常態，增加 Z-score 的穩定度。")
+        st.markdown("### 📐 數學模型與參數設定")
         
-        use_kalman = st.toggle("使用 Kalman Filter 動態估計 Beta", value=False, help="使用狀態空間模型逐日動態更新避險比率(Beta)。\n👉 影響：相比於傳統固定 OLS，能無延遲地平滑追蹤市場結構改變，避免視窗大小選擇錯誤造成的延遲。")
-        kalman_trans_cov = 1e-5
-        if use_kalman:
-            kalman_trans_cov = st.number_input("Kalman 狀態轉移共變異數 (漂移速度)", value=1e-5, format="%e", step=1e-6, help="👉 影響：數值越大，代表允許 Beta 的漂移速度越快（反應越靈敏但也容易有雜訊）；數值越小，Beta 越平滑。")
-            
-        use_ewma_z = st.toggle("使用 EWMA Variance 計算 Z-score", value=False, help="以指數加權移動平均(EWMA)來計算近期波動率。\n👉 影響：能賦予近期波動更大的權重，當市場突發劇烈震盪時，Z-score 的分母會立刻放大而使數值縮小，避免在假突破時過早進場。")
-        ewma_span = 20
-        if use_ewma_z:
-            ewma_span = st.slider("EWMA Span (天)", 5, 120, 20, 5, help="👉 影響：天數越短，對近期波動的反應越劇烈。")
-            
+        model_type = st.selectbox(
+            "核心數學模型",
+            ['Z-Score (標準)', 'OU 過程 (動態邊界)', '共整合 + GARCH', '卡爾曼濾波 (動態對沖比例)', 'Copula (CMPI 機率)'],
+            index=0
+        )
+        
+        model_params = {}
+        if model_type == 'Z-Score (標準)' or model_type == '共整合 + GARCH' or model_type == '卡爾曼濾波 (動態對沖比例)':
+            model_params['z_entry'] = st.slider("開倉閾值 (Z絕對值, 進場 ±Z)", 0.1, 5.0, 2.0, 0.1, help="調整進場的敏銳度，數值越小交易越頻繁")
+            model_params['z_exit'] = st.slider("平倉閾值 (Z 回歸)", -2.0, 2.0, 0.0, 0.1, help="當指標回歸到此數值時平倉")
+            model_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 60, 1, help="用於計算標準差或卡爾曼標準化")
+        elif model_type == 'OU 過程 (動態邊界)':
+            model_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 60, 1, help="用於擬合 OU 過程參數 (Theta, Mu, Sigma)")
+            st.info("OU 模型會自動根據均值回歸速度(Theta)與波動率計算動態上下界，無須手動設定固定閾值。")
+        elif model_type == 'Copula (CMPI 機率)':
+            model_params['prob_threshold'] = st.slider("條件機率閾值 (CMPI)", 0.500, 0.999, 0.950, 0.001, format="%.3f", help="達到多少極端機率才開倉 (0.5以上)")
+            model_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 60, 1, help="用於擬合 Copula 相關性與累積分配函數")
+
+        st.markdown("---")
+
+        st.markdown("---")
+        st.markdown("### 🧪 進階過濾機制 (OU/Beta)")
         use_ou_filter = st.toggle("啟用 OU Regime Filter", value=False, help="強制要求配對關係在統計上必須具有『均值回歸』特性才允許開倉。\n👉 影響：會大幅過濾掉交易次數，但能避開那些陷入單邊發散趨勢的標的，提升勝率。")
         ou_window = 60
         ou_min_r2 = 0.2
@@ -1026,13 +940,13 @@ def main():
 
         st.markdown("---")
         st.markdown("### 🕸️ 網格配對交易設定")
-        use_grid = st.toggle("啟用獨立網格模式", value=True, help="每一層網格獨立運作，擁有專屬的進場、停利、停損與重新建倉門檻。若關閉，則退回單一進出場模式。")
+        use_grid = st.toggle("啟用獨立網格模式", value=True, help="每一層網格獨立運作，擁有專屬的進場、停利、停損與重新建倉門檻。若關閉，則退回單一進出場模式，並自動套用上方高階模型的動態邊界。")
         
         grid_levels = []
         if use_grid:
-            st.info("⚠️ 啟用此功能後，將優先採用以下網格設定，忽略上方的『Z-Score 參數』區塊。")
+            st.info("⚠️ 啟用此功能後，將優先採用以下網格設定，忽略高階模型的浮動邊界。")
             num_grids = st.number_input("總共分幾層網格?", value=2, min_value=1, max_value=10, step=1)
-            for i in range(num_grids):
+            for i in range(int(num_grids)):
                 st.markdown(f"**第 {i+1} 層網格**")
                 col1, col2 = st.columns(2)
                 with col1:
@@ -1052,7 +966,6 @@ def main():
                     'pairs': pairs
                 })
 
-        st.markdown("---")
         st.markdown("### 📋 股期規格")
         st.info(f"""
         - **1 口 = {SHARES_PER_CONTRACT:,} 股 (2 張)**
@@ -1086,17 +999,10 @@ def main():
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
 
-        with st.spinner("正在執行回測分析..."):
+        with st.spinner("正在執行高階回測分析..."):
             name1 = name_map.get(sym1.replace('.TW', '').replace('.TWO', ''), '')
             name2 = name_map.get(sym2.replace('.TW', '').replace('.TWO', ''), '')
-            
-            # 建立 advanced_params 字典
             advanced_params = {
-                'use_log_price': use_log_price,
-                'use_kalman': use_kalman,
-                'kalman_trans_cov': kalman_trans_cov,
-                'use_ewma_z': use_ewma_z,
-                'ewma_span': ewma_span,
                 'use_ou_filter': use_ou_filter,
                 'ou_window': ou_window,
                 'ou_min_r2': ou_min_r2,
@@ -1113,24 +1019,11 @@ def main():
             
             df_records, df_trades, stats = run_backtest(
                 S1, S2, sym1, sym2, name1, name2, initial_capital, 
-                z_entry, z_exit, z_window, 
+                model_type, model_params, 
                 size_mode=size_mode, margin_usage_pct=margin_usage_pct,
                 run_start_date=start_str, run_end_date=end_str,
                 advanced_params=advanced_params
             )
-
-        # --- 產業資訊摘要 ---
-        industry_df = get_industry_data()
-        if industry_df is not None:
-            ind1 = industry_df.loc[sym1] if sym1 in industry_df.index else pd.Series({'Industry': '未知', 'Business': '未知'})
-            ind2 = industry_df.loc[sym2] if sym2 in industry_df.index else pd.Series({'Industry': '未知', 'Business': '未知'})
-            
-            st.markdown("## 🏢 標的產業與營收來源")
-            ind_col1, ind_col2 = st.columns(2)
-            with ind_col1:
-                st.info(f"**{sym1} ({name1})**\n\n**產業類別**: {ind1['Industry']}\n\n**主要業務**: {ind1['Business']}")
-            with ind_col2:
-                st.info(f"**{sym2} ({name2})**\n\n**產業類別**: {ind2['Industry']}\n\n**主要業務**: {ind2['Business']}")
 
         if stats.get('insufficient_margin_error', False):
             if 'msg' in stats:
@@ -1262,7 +1155,7 @@ def main():
 
         # 更多指標
         st.markdown("")
-        more1, more2, more3, more4, more5, more6 = st.columns(6)
+        more1, more2, more3, more4 = st.columns(4)
         with more1:
             st.markdown(f"""
             <div class="metric-card">
@@ -1287,37 +1180,12 @@ def main():
             </div>
             """, unsafe_allow_html=True)
         with more4:
-            # 加上夏普比率
-            sharpe = 0.0
-            if len(df_records) > 1:
-                daily_returns = df_records['帳戶淨值'].pct_change().dropna()
-                if len(daily_returns) > 1 and daily_returns.std() != 0:
-                    import numpy as np
-                    sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
-                    
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="label">夏普比率</div>
-                <div class="value {'positive' if sharpe >= 1.0 else 'negative'}">{sharpe:.2f}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with more5:
             coint_str = f"{stats['coint_pvalue']:.6f}" if stats['coint_pvalue'] is not None else "N/A"
             coint_cls = 'positive' if stats['coint_pvalue'] is not None and stats['coint_pvalue'] < 0.05 else 'negative'
             st.markdown(f"""
             <div class="metric-card">
                 <div class="label">共整合 P-value</div>
                 <div class="value {coint_cls}">{coint_str}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with more6:
-            hl = stats['half_life']
-            hl_str = f"{hl:.1f} 天" if hl != float('inf') else "發散 (未收斂)"
-            hl_cls = 'positive' if hl < 30 else 'negative'
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="label">平均收斂半衰期</div>
-                <div class="value {hl_cls}">{hl_str}</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -1364,19 +1232,31 @@ def main():
         fig_price.update_yaxes(title_text=sym2, secondary_y=True)
         st.plotly_chart(fig_price, use_container_width=True)
 
-        # (2) Z-Score + 訊號
+        # (2) 指標 + 訊號
         fig_z = go.Figure()
         fig_z.add_trace(go.Scatter(
             x=df_records.index, y=df_records['Z-Score'],
-            name='Z-Score', line=dict(color='#BB86FC', width=1),
+            name='指標 (Indicator)', line=dict(color='#BB86FC', width=1),
             fill='tozeroy', fillcolor='rgba(187,134,252,0.1)'
         ))
-        fig_z.add_hline(y=z_entry, line_dash="dash", line_color="red",
-                        annotation_text=f"+{z_entry}")
-        fig_z.add_hline(y=-z_entry, line_dash="dash", line_color="green",
-                        annotation_text=f"-{z_entry}")
-        fig_z.add_hline(y=z_exit, line_dash="dot", line_color="gray",
-                        annotation_text=f"Exit={z_exit}")
+        fig_z.add_trace(go.Scatter(
+            x=df_records.index, y=df_records['Upper_Bound'],
+            name='上界 (做空訊號)', line=dict(color='red', width=1, dash='dash')
+        ))
+        fig_z.add_trace(go.Scatter(
+            x=df_records.index, y=df_records['Lower_Bound'],
+            name='下界 (做多訊號)', line=dict(color='green', width=1, dash='dash')
+        ))
+        # 繪製平倉線
+        fig_z.add_trace(go.Scatter(
+            x=df_records.index, y=df_records['Exit_Upper'],
+            name='平倉線上界', line=dict(color='gray', width=1, dash='dot')
+        ))
+        if not (df_records['Exit_Upper'] == df_records['Exit_Lower']).all():
+            fig_z.add_trace(go.Scatter(
+                x=df_records.index, y=df_records['Exit_Lower'],
+                name='平倉線下界', line=dict(color='gray', width=1, dash='dot')
+            ))
 
         if not df_trades.empty:
             opens = df_trades[df_trades['動作'].str.contains('開倉')]
@@ -1449,44 +1329,6 @@ def main():
         )
         st.plotly_chart(fig_eq, use_container_width=True)
 
-        # (5) 進階濾波狀態追蹤 (Beta, OU)
-        st.markdown("### 🔬 進階濾波狀態追蹤")
-        fig_adv = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                                vertical_spacing=0.1, 
-                                subplot_titles=("動態 Beta 走勢 (避險比率)", "OU 模型狀態 (Half-life & R²)"))
-                                
-        # Beta
-        fig_adv.add_trace(go.Scatter(
-            x=df_records.index, y=df_records['Beta'],
-            name='Beta', line=dict(color='#FF5722', width=2)
-        ), row=1, col=1)
-        
-        # OU
-        if 'OU_HalfLife' in df_records.columns and not df_records['OU_HalfLife'].isna().all():
-            # 將 np.inf 或過大數值限制在圖表可視範圍
-            hl_plot = df_records['OU_HalfLife'].copy()
-            hl_plot[hl_plot > 100] = 100
-            
-            fig_adv.add_trace(go.Scatter(
-                x=df_records.index, y=hl_plot,
-                name='Half-life (天)', line=dict(color='#03A9F4', width=1.5)
-            ), row=2, col=1)
-            
-            fig_adv.add_trace(go.Scatter(
-                x=df_records.index, y=df_records['OU_R2'],
-                name='R²', line=dict(color='#8BC34A', width=1.5, dash='dot'),
-                yaxis="y3" # 需要在 layout 設定 secondary y 供子圖使用
-            ), row=2, col=1)
-            
-        fig_adv.update_layout(
-            template='plotly_dark', height=500,
-            margin=dict(l=60, r=60, t=30, b=30),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        # Fix secondary Y for R2 in subplot 2
-        fig_adv.update_layout(yaxis3=dict(overlaying='y2', side='right', range=[0, 1], title='R²'))
-        st.plotly_chart(fig_adv, use_container_width=True)
-
         # --- 交易明細表 ---
         st.markdown("## 📝 交易明細")
 
@@ -1531,9 +1373,9 @@ def main():
             4. 點擊「🚀 執行回測」查看完整結果<br>
             <br>
             <b>📌 交易規則</b><br>
-            • Z-Score > 閾值 → 做空 Spread（空標的B + 多標的A）<br>
-            • Z-Score < -閾值 → 做多 Spread（多標的B + 空標的A）<br>
-            • Z-Score 回歸平倉線 → 平倉<br>
+            • 指標 > 上界閾值 → 做空 Spread（空標的B + 多標的A）<br>
+            • 指標 < 下界閾值 → 做多 Spread（多標的B + 空標的A）<br>
+            • 指標回歸平倉線 → 平倉<br>
             • 漲跌停日（±10%）自動跳過，不會產生無法成交的虛假訊號<br>
             • 每月第 3 個禮拜三結算日自動平倉，次日以新價格重新建倉（含轉倉成本）
         </div>

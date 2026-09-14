@@ -1,0 +1,42 @@
+        model_params = {}
+        for model_type in selected_models:
+            if model_type == 'Z-Score (標準)' or model_type == '共整合 + GARCH' or model_type == '卡爾曼濾波 (動態對沖比例)':
+                model_params['z_entry'] = st.slider("開倉閾值 (Z絕對值, 進場 ±Z)", 0.1, 5.0, 2.0, 0.1, help="調整進場的敏銳度，數值越小交易越頻繁")
+                model_params['z_exit'] = st.slider("平倉閾值 (Z 回歸)", -2.0, 2.0, 0.0, 0.1, help="當指標回歸到此數值時平倉")
+                model_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, help="用於計算標準差或卡爾曼標準化")
+            elif model_type == 'OU 過程 (動態邊界)':
+                model_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, help="用於擬合 OU 過程參數 (Theta, Mu, Sigma)")
+                st.info("OU 模型會自動根據均值回歸速度(Theta)與波動率計算動態上下界，無須手動設定固定閾值。")
+            elif model_type == 'Copula (CMPI 機率)':
+                model_params['prob_threshold'] = st.slider("條件機率閾值 (CMPI)", 0.500, 0.999, 0.950, 0.001, format="%.3f", help="達到多少極端機率才開倉 (0.5以上)")
+                model_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, help="用於擬合 Copula 相關性與累積分配函數")
+            elif model_type == 'Merton 跳躍擴散模型 (過濾結構破裂)':
+                model_params['z_entry'] = st.slider("開倉閾值 (Z絕對值, 進場 ±Z)", 0.1, 5.0, 2.0, 0.1)
+                model_params['z_exit'] = st.slider("平倉閾值 (Z 回歸)", -2.0, 2.0, 0.0, 0.1)
+                model_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1)
+                model_params['jump_threshold'] = st.slider("跳躍過濾敏感度 (標準差倍數)", 1.0, 10.0, 3.0, 0.1, help="當日波動超過此倍數即判定為異常跳空，強制暫停該日交易。數值越低過濾越嚴格。")
+                st.info(" Jump-Diffusion 會在偵測到極端異常跳空時，動態將上下界設為無窮大以封鎖開倉。")
+            elif model_type == 'SDDE 隨機延遲方程式 (過濾動能慣性)':
+                model_params['z_entry'] = st.slider("開倉閾值 (Z絕對值, 進場 ±Z)", 0.1, 5.0, 2.0, 0.1)
+                model_params['z_exit'] = st.slider("平倉閾值 (Z 回歸)", -2.0, 2.0, 0.0, 0.1)
+                model_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1)
+                model_params['delay_tau'] = st.slider("歷史記憶天數 (τ)", 1, 20, 5, 1, help="計算過去幾天的發散動能。動能越強，模型會主動延後進場時機。")
+                st.info(" SDDE 模型會計算時間延遲積分，自動將帶有強大動能的『假突破』Z分數縮小，避免過早進場。")
+            elif model_type == '非參數 CUSUM (多變量幾何破裂)':
+                st.markdown("##### 非參數 CUSUM 參數")
+                model_params['cusum_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, key='cusum_w')
+                model_params['k_shift'] = st.slider("中位數漂移閾值 (MAD 倍數)", 0.1, 3.0, 1.0, 0.1, key='cusum_k')
+                model_params['tau_threshold'] = st.slider("停止時間閾值 (τ)", 1.0, 20.0, 5.0, 0.5, key='cusum_tau')
+            elif model_type == 'GSADF (爆炸性泡沫檢定)':
+                st.markdown("##### GSADF 參數")
+                model_params['gsadf_window'] = st.slider("滾動窗口 (天)", 15, 500, 30, 1, key='gsadf_w')
+                model_params['adf_threshold'] = st.slider("ADF t-統計量 閾值", 0.5, 4.0, 1.5, 0.1, key='gsadf_th')
+            elif model_type == 'MRS (馬爾可夫區制轉換)':
+                st.markdown("##### MRS 參數")
+                model_params['mrs_window'] = st.slider("滾動窗口 (天)", 30, 500, 120, 5, key='mrs_w')
+                model_params['prob_threshold'] = st.slider("發散區制機率閾值", 0.5, 0.99, 0.8, 0.05, key='mrs_prob')
+                st.info("⚠️ MRS 模型內部使用 MLE 估計轉移矩陣，計算極度耗時。")
+            elif model_type == 'DCC-GARCH-VECM (特異性漂移爆發)':
+                st.markdown("##### DCC-GARCH 參數")
+                model_params['garch_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, key='garch_w')
+                model_params['t_threshold'] = st.slider("爆發 t-統計量閾值", 1.0, 10.0, 3.0, 0.5, key='garch_t')
