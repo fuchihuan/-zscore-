@@ -29,11 +29,38 @@ def calc_contract_value(price):
 def calc_margin_per_contract(price):
     return calc_contract_value(price) * MARGIN_RATE
 
-def calc_trading_cost(price, contracts):
+def get_tick_size(price):
+    """台股與個股期貨最小升降單位 (Tick Size)"""
+    if price < 10:
+        return 0.01
+    elif price < 50:
+        return 0.05
+    elif price < 100:
+        return 0.10
+    elif price < 500:
+        return 0.50
+    elif price < 1000:
+        return 1.00
+    else:
+        return 5.00
+
+def calc_trading_cost_breakdown(price, contracts, slippage_ticks=0.0, commission=COMMISSION_PER_CONTRACT):
+    """
+    計算單邊交易成本明細:
+    - 期交稅 (Tax): 契約價值 * 10萬分之2
+    - 手續費 (Commission): 每口固定金額 (預設 30 元)
+    - 滑價成本 (Slippage): 滑價跳數 * 最小跳動點 * 2000股 * 口數
+    """
     contract_value = calc_contract_value(price) * contracts
     tax = contract_value * TRADING_FEE_RATE
-    commission = COMMISSION_PER_CONTRACT * contracts
-    return tax + commission
+    comm = commission * contracts
+    tick = get_tick_size(price)
+    slippage = slippage_ticks * tick * SHARES_PER_CONTRACT * contracts
+    return tax, comm, slippage
+
+def calc_trading_cost(price, contracts, slippage_ticks=0.0, commission=COMMISSION_PER_CONTRACT):
+    tax, comm, slippage = calc_trading_cost_breakdown(price, contracts, slippage_ticks, commission)
+    return tax + comm + slippage
 
 def find_min_contracts(price_s1, price_s2):
     target_ratio = price_s2 / price_s1
@@ -276,12 +303,25 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     settlement_dates = get_third_wednesdays(start_year, end_year)
 
     valid_dates = zscore.index
+    slippage_ticks = advanced_params.get('slippage_ticks', 0.0)
+    commission = advanced_params.get('commission', COMMISSION_PER_CONTRACT)
+    enable_stop_loss = advanced_params.get('enable_stop_loss', True)
+    stop_loss_z = advanced_params.get('stop_loss_z', 3.5)
+    reentry_cooldown_z = advanced_params.get('reentry_cooldown_z', 2.0)
+
+    total_slippage_cost = 0.0
+    total_tax_comm_cost = 0.0
+    stop_loss_count = 0
+
     use_grid = advanced_params.get('use_grid', False)
     grid_levels = advanced_params.get('grid_levels', [])
     
     if not use_grid:
         grid_levels = [{
-            'id': 1, 'pairs': advanced_params.get('fixed_pair_multiplier', 1)
+            'id': 1, 
+            'pairs': advanced_params.get('fixed_pair_multiplier', 1),
+            'sl_z': stop_loss_z,
+            'reentry_z': reentry_cooldown_z
         }]
 
     grid_states = []
@@ -307,6 +347,17 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     skipped_limits = 0
     settlement_rolls = 0
     total_roll_cost = 0.0
+
+    def calc_leg_costs(p1, c1, p2, c2, is_settle=False):
+        nonlocal total_slippage_cost, total_tax_comm_cost
+        slip_t = 0.0 if is_settle else slippage_ticks
+        t1, m1, s1 = calc_trading_cost_breakdown(p1, c1, slip_t, commission)
+        t2, m2, s2 = calc_trading_cost_breakdown(p2, c2, slip_t, commission)
+        slip = s1 + s2
+        feetax = t1 + m1 + t2 + m2
+        total_slippage_cost += slip
+        total_tax_comm_cost += feetax
+        return feetax + slip
     
     def get_trade_size(p1, p2, pairs, available_cash):
         if pairs == -1 or size_mode == '依保證金上限最大化（預設）':
@@ -380,7 +431,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                     state['entry_p1'], state['entry_p2'] = p1, p2
                     state['entry_zscore'] = z
                     state['entry_date'] = date
-                    cost = calc_trading_cost(p1, dyn_c1) + calc_trading_cost(p2, dyn_c2)
+                    cost = calc_leg_costs(p1, dyn_c1, p2, dyn_c2, is_settle=False)
                     cash -= cost
                     realized_pnl_total -= cost
                     total_roll_cost += cost
@@ -393,7 +444,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                 if state['is_active']:
                     pos = state['direction']
                     params = state['params']
-                    cost = calc_trading_cost(p1, state['c1']) + calc_trading_cost(p2, state['c2'])
+                    cost = calc_leg_costs(p1, state['c1'], p2, state['c2'], is_settle=True)
                     net_pnl = state['unrealized_pnl'] - cost
                     cash += net_pnl
                     realized_pnl_total += net_pnl
@@ -402,6 +453,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                     
                     trade_log.append({
                         '日期': date.strftime('%Y-%m-%d'),
+                        '動作': '結算平倉',
                         '損益': round(net_pnl, 0)
                     })
                     
@@ -425,30 +477,38 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                 pos = state['direction']
                 params = state['params']
                 trade_mode = advanced_params.get('trade_mode', '收斂 (均值回歸)')
+                sl_threshold = params.get('sl_z', stop_loss_z)
+
                 if use_grid:
                     if trade_mode == '收斂 (均值回歸)':
                         hit_tp = (pos == 1 and z >= params['tp_z']) or (pos == -1 and z <= -params['tp_z'])
-                        hit_sl = (pos == 1 and z <= -params['sl_z']) or (pos == -1 and z >= params['sl_z'])
+                        hit_sl = (pos == 1 and z <= -sl_threshold) or (pos == -1 and z >= sl_threshold)
                     else:
                         hit_tp = (pos == 1 and z <= params['tp_z']) or (pos == -1 and z >= -params['tp_z'])
-                        hit_sl = (pos == 1 and z >= params['sl_z']) or (pos == -1 and z <= -params['sl_z'])
+                        hit_sl = (pos == 1 and z >= sl_threshold) or (pos == -1 and z <= -sl_threshold)
                 else:
                     if trade_mode == '收斂 (均值回歸)':
                         hit_tp = (pos == 1 and z >= dyn_exit_upper) or (pos == -1 and z <= dyn_exit_lower)
+                        hit_sl = enable_stop_loss and ((pos == 1 and z <= -sl_threshold) or (pos == -1 and z >= sl_threshold))
                     else:
                         hit_tp = (pos == 1 and z <= dyn_exit_upper) or (pos == -1 and z >= dyn_exit_lower)
-                    hit_sl = False 
+                        hit_sl = enable_stop_loss and ((pos == 1 and z >= sl_threshold) or (pos == -1 and z <= -sl_threshold))
                 
                 if hit_tp or hit_sl:
                     if is_limit:
                         skipped_limits += 1
                     else:
-                        cost = calc_trading_cost(p1, state['c1']) + calc_trading_cost(p2, state['c2'])
+                        cost = calc_leg_costs(p1, state['c1'], p2, state['c2'], is_settle=False)
                         net_pnl = state['unrealized_pnl'] - cost
                         cash += net_pnl
                         realized_pnl_total += net_pnl
+                        act_name = '停損平倉' if hit_sl else '停利平倉'
+                        if hit_sl:
+                            state['is_stopped_out'] = True
+                            stop_loss_count += 1
                         trade_log.append({
                             '日期': date.strftime('%Y-%m-%d'),
+                            '動作': act_name,
                             '損益': round(net_pnl, 0)
                         })
                         state['is_active'] = False
@@ -456,10 +516,8 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         for state in grid_states:
             if state['is_stopped_out']:
                 params = state['params']
-                if use_grid:
-                    if abs(z) <= params['reentry_z']:
-                        state['is_stopped_out'] = False
-                else:
+                re_thresh = params.get('reentry_z', reentry_cooldown_z)
+                if abs(z) <= re_thresh:
                     state['is_stopped_out'] = False
 
         for state in grid_states:
@@ -494,7 +552,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                         state['entry_p1'], state['entry_p2'] = p1, p2
                         state['entry_zscore'] = z
                         state['entry_date'] = date
-                        cost = calc_trading_cost(p1, dyn_c1) + calc_trading_cost(p2, dyn_c2)
+                        cost = calc_leg_costs(p1, dyn_c1, p2, dyn_c2, is_settle=False)
                         cash -= cost
                         realized_pnl_total -= cost
                         total_position = enter_dir
@@ -502,9 +560,19 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         margin_required_today = sum(calc_margin_per_contract(p1)*s['c1'] + calc_margin_per_contract(p2)*s['c2'] for s in grid_states if s['is_active'])
         unrealized_pnl = sum(s.get('unrealized_pnl', 0.0) for s in grid_states if s['is_active'])
         equity = cash + unrealized_pnl
+
+        if not use_grid:
+            rec_stop_upper = stop_loss_z if enable_stop_loss else np.nan
+            rec_stop_lower = -stop_loss_z if enable_stop_loss else np.nan
+        else:
+            rec_stop_upper = max(g['sl_z'] for g in grid_levels)
+            rec_stop_lower = -rec_stop_upper
+
         records.append({
             '日期': date,
-            '帳戶淨值': equity
+            '帳戶淨值': equity,
+            'Stop_Upper': rec_stop_upper,
+            'Stop_Lower': rec_stop_lower
         })
 
     df_records = pd.DataFrame(records).set_index('日期')
@@ -560,5 +628,11 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     stats['base_s1'] = base_s1
     stats['base_s2'] = base_s2
     stats['base_margin'] = base_margin
+    stats['total_slippage_cost'] = total_slippage_cost
+    stats['total_tax_comm_cost'] = total_tax_comm_cost
+    stats['total_trading_cost'] = total_slippage_cost + total_tax_comm_cost
+    stats['stop_loss_count'] = stop_loss_count
+    stats['slippage_ticks'] = slippage_ticks
+    stats['stop_loss_z'] = stop_loss_z if enable_stop_loss else None
 
     return df_records, df_trades, stats

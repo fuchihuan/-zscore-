@@ -724,11 +724,40 @@ def calc_margin_per_contract(price):
     return calc_contract_value(price) * MARGIN_RATE
 
 
-def calc_trading_cost(price, contracts):
+def get_tick_size(price):
+    """台股與個股期貨最小升降單位 (Tick Size)"""
+    if price < 10:
+        return 0.01
+    elif price < 50:
+        return 0.05
+    elif price < 100:
+        return 0.10
+    elif price < 500:
+        return 0.50
+    elif price < 1000:
+        return 1.00
+    else:
+        return 5.00
+
+
+def calc_trading_cost_breakdown(price, contracts, slippage_ticks=0.0, commission=COMMISSION_PER_CONTRACT):
+    """
+    計算單邊交易成本明細:
+    - 期交稅 (Tax): 契約價值 * 10萬分之2
+    - 手續費 (Commission): 每口固定金額 (預設 30 元)
+    - 滑價成本 (Slippage): 滑價跳數 * 最小跳動點 * 2000股 * 口數
+    """
     contract_value = calc_contract_value(price) * contracts
     tax = contract_value * TRADING_FEE_RATE
-    commission = COMMISSION_PER_CONTRACT * contracts
-    return tax + commission
+    comm = commission * contracts
+    tick = get_tick_size(price)
+    slippage = slippage_ticks * tick * SHARES_PER_CONTRACT * contracts
+    return tax, comm, slippage
+
+
+def calc_trading_cost(price, contracts, slippage_ticks=0.0, commission=COMMISSION_PER_CONTRACT):
+    tax, comm, slippage = calc_trading_cost_breakdown(price, contracts, slippage_ticks, commission)
+    return tax + comm + slippage
 
 
 def find_min_contracts(price_s1, price_s2):
@@ -1015,12 +1044,25 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     valid_dates = zscore.index
     dates_list = list(valid_dates)
     
+    slippage_ticks = advanced_params.get('slippage_ticks', 1.0)
+    commission = advanced_params.get('commission', COMMISSION_PER_CONTRACT)
+    enable_stop_loss = advanced_params.get('enable_stop_loss', True)
+    stop_loss_z = advanced_params.get('stop_loss_z', 3.5)
+    reentry_cooldown_z = advanced_params.get('reentry_cooldown_z', 2.0)
+
+    total_slippage_cost = 0.0
+    total_tax_comm_cost = 0.0
+    stop_loss_count = 0
+
     use_grid = advanced_params.get('use_grid', False)
     grid_levels = advanced_params.get('grid_levels', [])
     
     if not use_grid:
         grid_levels = [{
-            'id': 1, 'pairs': advanced_params.get('fixed_pair_multiplier', 1)
+            'id': 1, 
+            'pairs': advanced_params.get('fixed_pair_multiplier', 1),
+            'sl_z': stop_loss_z,
+            'reentry_z': reentry_cooldown_z
         }]
 
     grid_states = []
@@ -1046,6 +1088,17 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     skipped_limits = 0
     settlement_rolls = 0
     total_roll_cost = 0.0
+
+    def calc_leg_costs(p1, c1, p2, c2, is_settle=False):
+        nonlocal total_slippage_cost, total_tax_comm_cost
+        slip_t = 0.0 if is_settle else slippage_ticks
+        t1, m1, s1 = calc_trading_cost_breakdown(p1, c1, slip_t, commission)
+        t2, m2, s2 = calc_trading_cost_breakdown(p2, c2, slip_t, commission)
+        slip = s1 + s2
+        feetax = t1 + m1 + t2 + m2
+        total_slippage_cost += slip
+        total_tax_comm_cost += feetax
+        return feetax + slip, slip, feetax
     
     def get_trade_size(p1, p2, pairs, available_cash):
         if pairs == -1 or size_mode == '依保證金上限最大化（預設）':
@@ -1124,7 +1177,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                     state['entry_zscore'] = z
                     state['entry_date'] = date
                     
-                    cost = calc_trading_cost(p1, dyn_c1) + calc_trading_cost(p2, dyn_c2)
+                    cost, slip, feetax = calc_leg_costs(p1, dyn_c1, p2, dyn_c2, is_settle=False)
                     cash -= cost
                     realized_pnl_total -= cost
                     total_roll_cost += cost
@@ -1140,7 +1193,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                         f'{sym1}價': round(p1, 2), f'{sym2}價': round(p2, 2),
                         f'{sym1}口數': dyn_c1, f'{sym2}口數': dyn_c2,
                         '保證金佔用': round(margin_required_today + dyn_req, 0),
-                        'Z-Score': round(z, 2), '交易成本': round(cost, 0), '損益': 0
+                        'Z-Score': round(z, 2), '交易成本': round(cost, 0), '滑價成本': round(slip, 0), '損益': 0
                     })
                     state['pending_reopen_dir'] = 0
                 else:
@@ -1153,7 +1206,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                 if state['is_active']:
                     pos = state['direction']
                     params = state['params']
-                    cost = calc_trading_cost(p1, state['c1']) + calc_trading_cost(p2, state['c2'])
+                    cost, slip, feetax = calc_leg_costs(p1, state['c1'], p2, state['c2'], is_settle=True)
                     net_pnl = state['unrealized_pnl'] - cost
                     cash += net_pnl
                     realized_pnl_total += net_pnl
@@ -1174,6 +1227,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                         'Z-Score': round(z, 2),
                         '開倉Z': round(state['entry_zscore'], 2),
                         '交易成本': round(cost, 0),
+                        '滑價成本': round(slip, 0),
                         '損益': round(net_pnl, 0)
                     })
                     
@@ -1211,26 +1265,29 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                     params = state['params']
                     
                     trade_mode = advanced_params.get('trade_mode', '收斂 (均值回歸)')
+                    sl_threshold = params.get('sl_z', stop_loss_z)
+
                     if use_grid:
                         if trade_mode == '收斂 (均值回歸)':
                             hit_tp = (pos == 1 and z >= params['tp_z']) or (pos == -1 and z <= -params['tp_z'])
-                            hit_sl = (pos == 1 and z <= -params['sl_z']) or (pos == -1 and z >= params['sl_z'])
+                            hit_sl = (pos == 1 and z <= -sl_threshold) or (pos == -1 and z >= sl_threshold)
                         else:
                             hit_tp = (pos == 1 and z <= params['tp_z']) or (pos == -1 and z >= -params['tp_z'])
-                            hit_sl = (pos == 1 and z >= params['sl_z']) or (pos == -1 and z <= -params['sl_z'])
+                            hit_sl = (pos == 1 and z >= sl_threshold) or (pos == -1 and z <= -sl_threshold)
                     else:
                         if trade_mode == '收斂 (均值回歸)':
                             hit_tp = (pos == 1 and z >= dyn_exit_upper) or (pos == -1 and z <= dyn_exit_lower)
+                            hit_sl = enable_stop_loss and ((pos == 1 and z <= -sl_threshold) or (pos == -1 and z >= sl_threshold))
                         else:
                             hit_tp = (pos == 1 and z <= dyn_exit_upper) or (pos == -1 and z >= dyn_exit_lower)
-                        hit_sl = False 
+                            hit_sl = enable_stop_loss and ((pos == 1 and z >= sl_threshold) or (pos == -1 and z <= -sl_threshold))
                     
                     if hit_tp or hit_sl:
                         if is_limit:
                             action += f'[網格{params["id"]}] 漲跌停無法平倉 '
                             skipped_limits += 1
                         else:
-                            cost = calc_trading_cost(p1, state['c1']) + calc_trading_cost(p2, state['c2'])
+                            cost, slip, feetax = calc_leg_costs(p1, state['c1'], p2, state['c2'], is_settle=False)
                             net_pnl = state['unrealized_pnl'] - cost
                             cash += net_pnl
                             realized_pnl_total += net_pnl
@@ -1243,6 +1300,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                             else:
                                 action_name = '停損平倉'
                                 state['is_stopped_out'] = True
+                                stop_loss_count += 1
                                 
                             action += f'[網格{params["id"]}] {action_name}: {direction_str}, 損益={net_pnl:+,.0f} '
                             
@@ -1257,6 +1315,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                                 'Z-Score': round(z, 2),
                                 '開倉Z': round(state['entry_zscore'], 2),
                                 '交易成本': round(cost, 0),
+                                '滑價成本': round(slip, 0),
                                 '損益': round(net_pnl, 0)
                             })
                             state['is_active'] = False
@@ -1265,12 +1324,10 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
             for state in grid_states:
                 if state['is_stopped_out']:
                     params = state['params']
-                    if use_grid:
-                        if abs(z) <= params['reentry_z']:
-                            state['is_stopped_out'] = False
-                            action += f" [網格{params['id']}] Z分數回落解除冷卻 "
-                    else:
+                    re_thresh = params.get('reentry_z', reentry_cooldown_z)
+                    if abs(z) <= re_thresh:
                         state['is_stopped_out'] = False
+                        action += f" [網格{params['id']}] Z分數回落至{re_thresh:.1f}解除冷卻 "
 
             # 6. 正常開倉 (Entry)
             for state in grid_states:
@@ -1311,7 +1368,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                             state['entry_zscore'] = z
                             state['entry_date'] = date
                             
-                            cost = calc_trading_cost(p1, dyn_c1) + calc_trading_cost(p2, dyn_c2)
+                            cost, slip, feetax = calc_leg_costs(p1, dyn_c1, p2, dyn_c2, is_settle=False)
                             cash -= cost
                             realized_pnl_total -= cost
                             
@@ -1327,7 +1384,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                                 f'{sym1}價': round(p1, 2), f'{sym2}價': round(p2, 2),
                                 f'{sym1}口數': dyn_c1, f'{sym2}口數': dyn_c2,
                                 '保證金佔用': round(margin_required_today + dyn_req, 0),
-                                'Z-Score': round(z, 2), '交易成本': round(cost, 0), '損益': 0
+                                'Z-Score': round(z, 2), '交易成本': round(cost, 0), '滑價成本': round(slip, 0), '損益': 0
                             })
                             total_position = enter_dir
                         else:
@@ -1339,6 +1396,13 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         frozen_margin = margin_required_today
         equity = cash + unrealized_pnl
 
+        if not use_grid:
+            rec_stop_upper = stop_loss_z if enable_stop_loss else np.nan
+            rec_stop_lower = -stop_loss_z if enable_stop_loss else np.nan
+        else:
+            rec_stop_upper = max(g['sl_z'] for g in grid_levels)
+            rec_stop_lower = -rec_stop_upper
+
         records.append({
             '日期': date,
             f'{sym1}價': p1, f'{sym2}價': p2,
@@ -1347,6 +1411,8 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
             'Lower_Bound': dyn_lower if not use_grid else np.nan,
             'Exit_Upper': dyn_exit_upper if not use_grid else np.nan,
             'Exit_Lower': dyn_exit_lower if not use_grid else np.nan,
+            'Stop_Upper': rec_stop_upper,
+            'Stop_Lower': rec_stop_lower,
             f'{sym1}口數': sum(s['c1'] for s in grid_states if s['is_active']),
             f'{sym2}口數': sum(s['c2'] for s in grid_states if s['is_active']),
             '未實現損益': unrealized_pnl,
@@ -1430,6 +1496,12 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     stats['skipped_limits'] = skipped_limits
     stats['settlement_rolls'] = settlement_rolls
     stats['total_roll_cost'] = total_roll_cost
+    stats['total_slippage_cost'] = total_slippage_cost
+    stats['total_tax_comm_cost'] = total_tax_comm_cost
+    stats['total_trading_cost'] = total_slippage_cost + total_tax_comm_cost
+    stats['stop_loss_count'] = stop_loss_count
+    stats['slippage_ticks'] = slippage_ticks
+    stats['stop_loss_z'] = stop_loss_z if enable_stop_loss else None
 
     margin_when_holding = df_records[df_records['持倉'] != 0]['凍結保證金']
     if not margin_when_holding.empty:
@@ -1863,12 +1935,42 @@ def main():
                     'pairs': pairs
                 })
 
+        st.markdown("---")
+        st.markdown("### 🛑 停損線與風險控管設定")
+        if not use_grid:
+            enable_stop_loss = st.toggle("啟用 Z-Score 停損線", value=True, help="當價差持續逆勢走揚/下殺超過停損閾值時，強制停損出場，截斷結構性發散大賠風險。")
+            if enable_stop_loss:
+                stop_loss_z = st.number_input("停損門檻 (Z 絕對值)", min_value=1.5, max_value=10.0, value=3.5, step=0.1, help="當 Z 分數絕對值突破此數值時，立即執行停損平倉。推薦設定 3.0 ~ 4.0。")
+                reentry_cooldown_z = st.number_input("停損後冷卻重啟門檻 (Z 絕對值)", min_value=0.5, max_value=5.0, value=2.0, step=0.1, help="停損後，必須等到 Z 分數回落至此閾值以內，才允許重新開倉，防止在極端行情中連續被洗出場。")
+            else:
+                stop_loss_z = 999.0
+                reentry_cooldown_z = 2.0
+        else:
+            enable_stop_loss = True
+            stop_loss_z = 3.5
+            reentry_cooldown_z = 2.0
+            st.caption("ℹ️ 網格模式下，已於上方各層網格獨立自訂專屬停損門檻 (Z) 與重啟冷卻門檻。")
+
+        st.markdown("---")
+        st.markdown("### 💰 交易成本與滑價設定")
+        slippage_ticks = st.number_input(
+            "單邊滑價跳數 (Ticks)", 
+            min_value=0.0, max_value=10.0, value=1.0, step=0.5,
+            help="每次下單(買/賣)預期的滑價跳動檔數。0 為無滑價(理論完美狀況)；1 為市價單吃 1 檔最佳買賣價差(實務最推薦)。台股股期 1 檔跳動金額依股價為 0.01~5.0 元 (1口=2000股，1跳約 20~10,000 元)。"
+        )
+        custom_commission = st.number_input(
+            "每口手續費 (元/單邊)", 
+            min_value=0, max_value=200, value=COMMISSION_PER_CONTRACT, step=5,
+            help="期貨商個股期貨單邊手續費，預設 30 元/口"
+        )
+
         st.markdown("### 📋 股期規格")
         st.info(f"""
         - **1 口 = {SHARES_PER_CONTRACT:,} 股 (2 張)**
         - **保證金比率: {MARGIN_RATE*100:.1f}%**
         - **期交稅: {TRADING_FEE_RATE*100000:.0f}/100,000 (單邊)**
-        - **手續費: {COMMISSION_PER_CONTRACT} 元/口 (單邊)**
+        - **手續費: {custom_commission} 元/口 (單邊)**
+        - **滑價設定: {slippage_ticks} 檔跳數 (單邊)**
         - **漲跌停: ±{LIMIT_PCT*100:.0f}% 不可交易**
         - **結算日: 每月第3個禮拜三**
         - **轉倉: 結算平倉→次日開倉**
@@ -1911,7 +2013,12 @@ def main():
                 'use_smart_roll': use_smart_roll,
                 'smart_roll_z': smart_roll_z,
                 'use_grid': use_grid,
-                'grid_levels': grid_levels
+                'grid_levels': grid_levels,
+                'slippage_ticks': slippage_ticks,
+                'commission': custom_commission,
+                'enable_stop_loss': enable_stop_loss,
+                'stop_loss_z': stop_loss_z,
+                'reentry_cooldown_z': reentry_cooldown_z
             }
             
             advanced_params['trade_mode'] = trade_mode  # Pass trade_mode via advanced_params
@@ -2134,8 +2241,51 @@ def main():
             </div>
             """, unsafe_allow_html=True)
 
+        # 交易成本與風控指標卡片
+        st.markdown("")
+        cost1, cost2, cost3, cost4 = st.columns(4)
+        with cost1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="label">總交易成本 (含滑價)</div>
+                <div class="value negative">{stats.get('total_trading_cost', 0):,.0f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with cost2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="label">累計滑價成本 ({stats.get('slippage_ticks', 0):.1f} Ticks)</div>
+                <div class="value negative">{stats.get('total_slippage_cost', 0):,.0f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with cost3:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="label">手續費與期交稅</div>
+                <div class="value negative">{stats.get('total_tax_comm_cost', 0):,.0f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with cost4:
+            sl_cnt = stats.get('stop_loss_count', 0)
+            sl_cls = 'negative' if sl_cnt > 0 else 'positive'
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="label">停損出場次數</div>
+                <div class="value {sl_cls}">{sl_cnt} 次</div>
+            </div>
+            """, unsafe_allow_html=True)
+
         # 結算轉倉 & 漲跌停統計
         info_parts = []
+        if stats.get('total_slippage_cost', 0) > 0 or stats.get('slippage_ticks', 0) > 0:
+            info_parts.append(
+                f"單邊滑價 <b>{stats.get('slippage_ticks', 0):.1f}</b> 檔，"
+                f"累計滑價成本 <b>{stats.get('total_slippage_cost', 0):,.0f}</b> 元"
+            )
+        if stats.get('stop_loss_count', 0) > 0:
+            info_parts.append(
+                f"🛑 停損出場 <b>{stats['stop_loss_count']}</b> 次"
+            )
         if stats['settlement_rolls'] > 0:
             info_parts.append(
                 f"每月結算轉倉 <b>{stats['settlement_rolls']}</b> 次，"
@@ -2202,27 +2352,55 @@ def main():
                 x=df_records.index, y=df_records['Exit_Lower'],
                 name='平倉線下界', line=dict(color='gray', width=1, dash='dot')
             ))
+        
+        # 繪製停損線 (Stop-Loss Lines)
+        if 'Stop_Upper' in df_records.columns and not df_records['Stop_Upper'].isna().all():
+            fig_z.add_trace(go.Scatter(
+                x=df_records.index, y=df_records['Stop_Upper'],
+                name='停損線上界 (+SL)', line=dict(color='#FF5252', width=1.5, dash='dashdot')
+            ))
+            fig_z.add_trace(go.Scatter(
+                x=df_records.index, y=df_records['Stop_Lower'],
+                name='停損線下界 (-SL)', line=dict(color='#FF5252', width=1.5, dash='dashdot')
+            ))
 
         if not df_trades.empty:
             opens = df_trades[df_trades['動作'].str.contains('開倉')]
-            closes = df_trades[df_trades['動作'].str.contains('平倉')]
+            tps = df_trades[df_trades['動作'].str.contains('停利')]
+            sls = df_trades[df_trades['動作'].str.contains('停損')]
+            rolls = df_trades[df_trades['動作'].str.contains('結算平倉')]
+            
             if not opens.empty:
                 fig_z.add_trace(go.Scatter(
                     x=pd.to_datetime(opens['日期']), y=opens['Z-Score'],
                     mode='markers', name='開倉',
-                    marker=dict(symbol='circle', size=10, color='#00BCD4',
+                    marker=dict(symbol='circle', size=9, color='#00BCD4',
                                 line=dict(width=1, color='white'))
                 ))
-            if not closes.empty:
+            if not tps.empty:
                 fig_z.add_trace(go.Scatter(
-                    x=pd.to_datetime(closes['日期']), y=closes['Z-Score'],
-                    mode='markers', name='平倉',
-                    marker=dict(symbol='x', size=10, color='#FFD700',
-                                line=dict(width=2, color='white'))
+                    x=pd.to_datetime(tps['日期']), y=tps['Z-Score'],
+                    mode='markers', name='停利平倉',
+                    marker=dict(symbol='triangle-up', size=11, color='#00E676',
+                                line=dict(width=1, color='white'))
+                ))
+            if not sls.empty:
+                fig_z.add_trace(go.Scatter(
+                    x=pd.to_datetime(sls['日期']), y=sls['Z-Score'],
+                    mode='markers', name='停損平倉 (SL)',
+                    marker=dict(symbol='x', size=12, color='#FF1744',
+                                line=dict(width=2.5, color='white'))
+                ))
+            if not rolls.empty:
+                fig_z.add_trace(go.Scatter(
+                    x=pd.to_datetime(rolls['日期']), y=rolls['Z-Score'],
+                    mode='markers', name='結算平倉',
+                    marker=dict(symbol='diamond', size=8, color='#FFD700',
+                                line=dict(width=1, color='black'))
                 ))
 
         fig_z.update_layout(
-            title='Z-Score 與進出場訊號',
+            title='Z-Score 與進出場訊號 (含停利/停損線)',
             template='plotly_dark', height=350,
             margin=dict(l=60, r=60, t=50, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
