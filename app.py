@@ -18,6 +18,7 @@ from plotly.subplots import make_subplots
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import coint
 import os
+import json
 import yfinance as yf
 import datetime
 import calendar
@@ -107,11 +108,54 @@ st.markdown("""
         color: #fda085;
     }
     
-    div[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0a192f, #112240);
+    /* 側邊欄寬度與排版優化 */
+    section[data-testid="stSidebar"], div[data-testid="stSidebar"] {
+        min-width: 360px !important;
     }
-    div[data-testid="stSidebar"] * {
-        color: #ccd6f6 !important;
+    
+    /* 側邊欄專屬標的檔案卡片 */
+    .stock-badge-card {
+        background: #1e293b;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        padding: 9px 12px;
+        margin-top: -6px;
+        margin-bottom: 12px;
+        color: #f1f5f9;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+    .stock-badge-card-a {
+        border-left: 4px solid #38bdf8;
+    }
+    .stock-badge-card-b {
+        border-left: 4px solid #f472b6;
+    }
+    .subind-pill {
+        display: inline-block;
+        background: #0284c7;
+        color: white !important;
+        padding: 2px 7px;
+        border-radius: 4px;
+        font-size: 0.72rem;
+        font-weight: 600;
+    }
+    .subind-pill-b {
+        display: inline-block;
+        background: #db2777;
+        color: white !important;
+        padding: 2px 7px;
+        border-radius: 4px;
+        font-size: 0.72rem;
+        font-weight: 600;
+    }
+    .pair-summary-pill {
+        background: #0f172a;
+        border: 1px dashed #475569;
+        border-radius: 8px;
+        padding: 8px 12px;
+        margin-bottom: 14px;
+        font-size: 0.82rem;
+        color: #e2e8f0;
     }
     
     .stButton > button {
@@ -128,6 +172,91 @@ st.markdown("""
     .stButton > button:hover {
         transform: translateY(-2px) !important;
         box-shadow: 0 4px 20px rgba(245, 87, 108, 0.4) !important;
+    }
+    
+    /* 細產業與產品營收卡片樣式 */
+    .industry-panel {
+        background: linear-gradient(135deg, #131b2e, #0c1424);
+        border: 1px solid rgba(100, 255, 218, 0.25);
+        border-radius: 14px;
+        padding: 1.4rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 6px 24px rgba(0,0,0,0.3);
+    }
+    .subind-badge {
+        display: inline-block;
+        background: linear-gradient(90deg, #64ffda, #38ef7d);
+        color: #0a192f !important;
+        font-weight: 700;
+        font-size: 0.82rem;
+        padding: 0.25rem 0.65rem;
+        border-radius: 6px;
+        margin-right: 0.4rem;
+    }
+    .cat-badge {
+        display: inline-block;
+        background: rgba(255,255,255,0.12);
+        color: #ccd6f6 !important;
+        font-size: 0.78rem;
+        padding: 0.22rem 0.55rem;
+        border-radius: 6px;
+    }
+    .rev-row {
+        display: flex;
+        align-items: center;
+        margin: 0.4rem 0;
+        font-size: 0.85rem;
+    }
+    .rev-name {
+        width: 38%;
+        color: #ccd6f6;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .rev-bar-bg {
+        width: 44%;
+        background: rgba(255,255,255,0.08);
+        border-radius: 4px;
+        height: 8px;
+        margin: 0 0.5rem;
+        overflow: hidden;
+    }
+    .rev-bar-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #64ffda, #00b4d8);
+        border-radius: 4px;
+    }
+    .rev-pct {
+        width: 18%;
+        text-align: right;
+        font-weight: 600;
+        color: #64ffda;
+        font-size: 0.85rem;
+    }
+    .diag-banner-green {
+        background: linear-gradient(135deg, rgba(16, 185, 129, 0.18), rgba(5, 150, 105, 0.08));
+        border: 1px solid rgba(16, 185, 129, 0.45);
+        border-radius: 12px;
+        padding: 1.1rem 1.4rem;
+        margin: 1rem 0;
+        color: #6ee7b7;
+    }
+    .diag-banner-yellow {
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.18), rgba(217, 119, 6, 0.08));
+        border: 1px solid rgba(245, 158, 11, 0.45);
+        border-radius: 12px;
+        padding: 1.1rem 1.4rem;
+        margin: 1rem 0;
+        color: #fde68a;
+    }
+    .diag-banner-red {
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.18), rgba(185, 28, 28, 0.08));
+        border: 1px solid rgba(239, 68, 68, 0.45);
+        border-radius: 12px;
+        padding: 1.1rem 1.4rem;
+        margin: 1rem 0;
+        color: #fca5a5;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -151,7 +280,7 @@ TAIFEX_FILE = os.path.join(os.path.dirname(__file__), 'taifex_stocks.csv')
 # ============================================================
 @st.cache_data(ttl=3600)
 def load_price_data():
-    """載入已下載的股價資料並自動更新到最新，同時抓取全球資產"""
+    """載入已下載的股價資料並自動更新到今日（包含台股與全球資產）"""
     import yfinance as yf
     import datetime
     
@@ -162,18 +291,24 @@ def load_price_data():
     df = pd.read_csv(DATA_FILE, index_col=0, parse_dates=True)
     df = df.dropna(axis=1, thresh=len(df) * 0.8)
     
-    # 2. 自動更新台股資料到最新日期
-    last_date = df.index[-1]
+    dirty = False
+    
+    # 2. 判斷台股最後更新日
+    tw_cols = [c for c in df.columns if '.TW' in c or '.TWO' in c]
+    if tw_cols:
+        tw_last_date = df[tw_cols].dropna(how='all').index[-1]
+    else:
+        tw_last_date = df.index[-1]
+        
     today = datetime.datetime.now()
-    if last_date.date() < today.date() - datetime.timedelta(days=1):
+    if tw_last_date.date() < today.date() - datetime.timedelta(days=1):
         try:
-            start_str = (last_date + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-            tw_tickers = [c for c in df.columns if '.TW' in c]
-            if tw_tickers:
-                new_data = yf.download(tw_tickers, start=start_str, group_by='ticker', auto_adjust=False, threads=True, progress=False)
+            start_str = (tw_last_date + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+            if tw_cols:
+                new_data = yf.download(tw_cols, start=start_str, group_by='ticker', auto_adjust=False, threads=True, progress=False)
                 new_df_list = []
                 if isinstance(new_data.columns, pd.MultiIndex):
-                    for tk in tw_tickers:
+                    for tk in tw_cols:
                         if tk in new_data:
                             tk_data = new_data[tk]
                             if 'Adj Close' in tk_data:
@@ -182,107 +317,90 @@ def load_price_data():
                                 new_df_list.append(series)
                 if new_df_list:
                     new_df = pd.concat(new_df_list, axis=1)
+                    # Use update to fill missing values and add new rows via concat
                     df = pd.concat([df, new_df])
+                    # Remove duplicated index just in case
+                    df = df[~df.index.duplicated(keep='last')]
+                    dirty = True
         except Exception as e:
             print(f"Error updating TW data: {e}")
 
-    # 3. 抓取全球資產資料 (從 2020-01-01 開始)
+    # 3. 更新全球資產資料
     global_symbols = {
         'NQ=F': '小納斯達克期貨', 'NIY=F': '日經225期貨', 'ES=F': 'S&P500期貨', 'YM=F': '小道瓊期貨',
         '^VIX': 'VIX恐慌指數', 'GC=F': '黃金期貨', 'CL=F': '輕原油期貨', 'SI=F': '白銀期貨', 'HG=F': '銅期貨',
         'EURUSD=X': '歐元/美元', 'USDJPY=X': '美元/日圓', 'GBPUSD=X': '英鎊/美元', 'AUDUSD=X': '澳幣/美元',
-        'BTC-USD': '比特幣', 'ETH-USD': '以太幣'
+        'BTC-USD': '比特幣', 'ETH-USD': '以太幣',
+        'SPY': 'SPDR S&P 500 ETF', 'QQQ': 'Invesco QQQ', 'DIA': 'SPDR Dow Jones', 'IWM': 'iShares Russell 2000',
+        'VTI': 'Vanguard Total Stock', 'TLT': 'iShares 20+ Yr Treasury', 'GLD': 'SPDR Gold Trust', 
+        'USO': 'United States Oil', 'VNQ': 'Vanguard Real Estate'
     }
     try:
-        global_data = yf.download(
-            list(global_symbols.keys()),
-            start='2020-01-01',
-            group_by='ticker',
-            auto_adjust=False,
-            threads=True,
-            progress=False
-        )
-        global_df_list = []
-        if isinstance(global_data.columns, pd.MultiIndex):
-            for tk in global_symbols.keys():
-                if tk in global_data:
-                    tk_data = global_data[tk]
-                    if 'Adj Close' in tk_data:
-                        series = tk_data['Adj Close'].dropna()
-                        series.name = tk
-                        global_df_list.append(series)
+        existing_global = [tk for tk in global_symbols.keys() if tk in df.columns]
+        if existing_global:
+            global_last_date = df[existing_global].dropna(how='all').index[-1]
+            g_start_str = global_last_date.strftime('%Y-%m-%d')
         else:
-            if 'Adj Close' in global_data:
-                series = global_data['Adj Close'].dropna()
-                series.name = list(global_symbols.keys())[0]
-                global_df_list.append(series)
-        
-        if global_df_list:
-            global_df = pd.concat(global_df_list, axis=1)
-            # 合併到台股資料
-            df = df.join(global_df, how='outer')
+            g_start_str = '2020-01-01'
+            
+        if not existing_global or global_last_date.date() < today.date() - datetime.timedelta(days=1):
+            global_data = yf.download(
+                list(global_symbols.keys()),
+                start=g_start_str,
+                group_by='ticker',
+                auto_adjust=False,
+                threads=True,
+                progress=False
+            )
+            global_df_list = []
+            if isinstance(global_data.columns, pd.MultiIndex):
+                for tk in global_symbols.keys():
+                    if tk in global_data:
+                        tk_data = global_data[tk]
+                        if 'Adj Close' in tk_data:
+                            series = tk_data['Adj Close'].dropna()
+                            series.name = tk
+                            global_df_list.append(series)
+            else:
+                if 'Adj Close' in global_data:
+                    series = global_data['Adj Close'].dropna()
+                    series.name = list(global_symbols.keys())[0]
+                    global_df_list.append(series)
+            
+            if global_df_list:
+                global_df = pd.concat(global_df_list, axis=1)
+                
+                # Update existing columns and append new ones
+                cols_to_add = [c for c in global_df.columns if c not in df.columns]
+                cols_to_update = [c for c in global_df.columns if c in df.columns]
+                
+                if cols_to_add:
+                    df = df.join(global_df[cols_to_add], how='outer')
+                    dirty = True
+                
+                if cols_to_update:
+                    for col in cols_to_update:
+                        new_series = global_df[col].dropna()
+                        if not new_series.empty:
+                            df.loc[new_series.index, col] = new_series
+                    dirty = True
+                    
     except Exception as e:
         print(f"Error fetching global data: {e}")
 
     df = df.ffill().bfill()
+    if dirty:
+        try:
+            df.to_csv(DATA_FILE)
+            print("Saved updated prices to CSV.")
+        except Exception as e:
+            print(f"Error saving to CSV: {e}")
+            
     return df
-
-def get_ticker_names():
-    """嘗試取得代號與公司名對照表，並附加產業別與全球資產"""
-    mapping = {}
-    if os.path.exists(TAIFEX_FILE):
-        try:
-            taifex_df = pd.read_csv(TAIFEX_FILE, encoding='utf-8-sig')
-            for _, row in taifex_df.iterrows():
-                code = str(row.iloc[2]).strip()
-                name = str(row.iloc[3]).strip()
-                if code != 'nan' and name != 'nan' and code:
-                    mapping[code] = name
-        except:
-            pass
-
-    # 附加產業別
-    industry_df = get_industry_data()
-    if industry_df is not None:
-        try:
-            for tk, row in industry_df.iterrows():
-                ind = row.get('Industry')
-                if pd.isna(ind) or not str(ind).strip():
-                    continue
-                code = str(tk).replace('.TWO', '').replace('.TW', '')
-                if code in mapping:
-                    mapping[code] = f"{mapping[code]} | {ind}"
-                else:
-                    mapping[code] = str(ind)
-        except:
-            pass
-
-    # 加入全球資產對應
-    global_assets = {
-        'NQ=F': '小納斯達克期貨 | 全球指數',
-        'NIY=F': '日經225期貨 | 全球指數',
-        'ES=F': 'S&P500期貨 | 全球指數',
-        'YM=F': '小道瓊期貨 | 全球指數',
-        '^VIX': 'VIX恐慌指數 | 全球指數',
-        'GC=F': '黃金期貨 | 大宗商品',
-        'CL=F': '輕原油期貨 | 大宗商品',
-        'SI=F': '白銀期貨 | 大宗商品',
-        'HG=F': '銅期貨 | 大宗商品',
-        'EURUSD=X': '歐元/美元 | 外匯',
-        'USDJPY=X': '美元/日圓 | 外匯',
-        'GBPUSD=X': '英鎊/美元 | 外匯',
-        'AUDUSD=X': '澳幣/美元 | 外匯',
-        'BTC-USD': '比特幣 | 加密貨幣',
-        'ETH-USD': '以太幣 | 加密貨幣'
-    }
-    mapping.update(global_assets)
-
-    return mapping
-
 
 @st.cache_data(ttl=3600)
 def get_industry_data():
-    """嘗試取得產業與主要業務資料"""
+    """載入全方位細產業與產品營收比重資料庫"""
     industry_file = os.path.join(os.path.dirname(__file__), 'industry_data.csv')
     if os.path.exists(industry_file):
         try:
@@ -290,6 +408,301 @@ def get_industry_data():
         except:
             return None
     return None
+
+
+@st.cache_data(ttl=3600)
+def get_subindustry_pairs():
+    """載入細產業內已預先計算之協整與高相關配對"""
+    f = os.path.join(os.path.dirname(__file__), 'cointegrated_subindustry_pairs.json')
+    if os.path.exists(f):
+        try:
+            with open(f, 'r', encoding='utf-8') as fp:
+                return json.load(fp)
+        except:
+            return []
+    return []
+
+
+@st.cache_data(ttl=3600)
+def get_high_pf_pairs():
+    """載入細產業獲利因子 > 3.0 精選配對回測數據"""
+    f = os.path.join(os.path.dirname(__file__), 'filtered_profit_factor_gt3_dedup.csv')
+    if os.path.exists(f):
+        try:
+            return pd.read_csv(f)
+        except:
+            return None
+    return None
+
+
+def get_ticker_names():
+    """取得代號與純淨公司名稱對照表"""
+    mapping = {}
+    ind_df = get_industry_data()
+    if ind_df is not None:
+        for tk, row in ind_df.iterrows():
+            code = str(row.get('Code', '')).strip()
+            name = str(row.get('Name', '')).strip()
+            if code and name and name != 'nan':
+                mapping[code] = name
+            if tk:
+                mapping[str(tk)] = name
+
+    if os.path.exists(TAIFEX_FILE):
+        try:
+            taifex_df = pd.read_csv(TAIFEX_FILE, encoding='utf-8-sig')
+            for _, row in taifex_df.iterrows():
+                code = str(row.iloc[2]).strip()
+                name = str(row.iloc[3]).strip()
+                if code != 'nan' and name != 'nan' and code and code not in mapping:
+                    mapping[code] = name
+        except:
+            pass
+
+    return mapping
+
+
+def get_stock_profile(sym, industry_df=None):
+    """取得標的的完整產業與產品營收結構"""
+    import json
+    if industry_df is None:
+        industry_df = get_industry_data()
+    
+    clean_code = str(sym).replace('.TWO', '').replace('.TW', '').strip()
+    
+    if industry_df is not None:
+        row = None
+        if sym in industry_df.index:
+            row = industry_df.loc[sym]
+        else:
+            matches = industry_df[industry_df['Code'].astype(str) == clean_code]
+            if not matches.empty:
+                row = matches.iloc[0]
+                
+        if row is not None:
+            prods = []
+            pj = row.get('ProductsJSON')
+            if pd.notna(pj) and str(pj).strip():
+                try:
+                    p_list = json.loads(str(pj))
+                    for p in p_list:
+                        if isinstance(p, dict):
+                            prods.append((str(p.get('item', '')), float(p.get('ratio', 0.0))))
+                except:
+                    pass
+            if not prods:
+                pb = row.get('ProductBreakdown')
+                if pd.notna(pb) and str(pb).strip():
+                    parts = str(pb).split('|')
+                    for part in parts:
+                        part = part.strip()
+                        if part:
+                            sub_parts = part.rsplit(' ', 1)
+                            if len(sub_parts) == 2 and '%' in sub_parts[1]:
+                                try:
+                                    r_val = float(sub_parts[1].replace('%', '').strip())
+                                    prods.append((sub_parts[0].strip(), r_val))
+                                except:
+                                    prods.append((part, 0.0))
+                            else:
+                                prods.append((part, 0.0))
+                                
+            return {
+                'ticker': sym,
+                'code': clean_code,
+                'name': str(row.get('Name', clean_code)),
+                'market': str(row.get('Market', '上市' if '.TW' in sym else '上櫃')),
+                'category': str(row.get('Category', '未分類')),
+                'sub_industry': str(row.get('SubIndustry', '一般產業')),
+                'industry': str(row.get('Industry', '一般產業')),
+                'primary_product': str(row.get('PrimaryProduct', '主要產品')),
+                'primary_ratio': float(row.get('PrimaryRatio', 0.0)) if pd.notna(row.get('PrimaryRatio')) else 0.0,
+                'product_breakdown': str(row.get('ProductBreakdown', '')),
+                'business': str(row.get('Business', '無主要業務說明')),
+                'products': prods
+            }
+            
+    return {
+        'ticker': sym,
+        'code': clean_code,
+        'name': clean_code,
+        'market': '全球' if '=' in sym or '-' in sym or '^' in sym else ('上櫃' if '.TWO' in sym else '上市'),
+        'category': '其他資產',
+        'sub_industry': '其他',
+        'industry': '其他',
+        'primary_product': '綜合資產',
+        'primary_ratio': 100.0,
+        'product_breakdown': '',
+        'business': '無業務說明',
+        'products': []
+    }
+
+
+def render_stock_card(prof):
+    prods = prof.get('products', [])
+    html_rows = []
+    if prods:
+        for item, ratio in prods[:6]:
+            bar_pct = min(100.0, max(0.0, float(ratio)))
+            html_rows.append(f"""
+            <div class="rev-row">
+                <div class="rev-name" title="{item}">{item}</div>
+                <div class="rev-bar-bg">
+                    <div class="rev-bar-fill" style="width: {bar_pct:.1f}%;"></div>
+                </div>
+                <div class="rev-pct">{ratio:.1f}%</div>
+            </div>
+            """)
+        rev_html = "".join(html_rows)
+    else:
+        p_name = prof.get('primary_product', '未提供細項')
+        p_ratio = prof.get('primary_ratio', 100.0)
+        rev_html = f"""
+        <div class="rev-row">
+            <div class="rev-name" title="{p_name}">{p_name}</div>
+            <div class="rev-bar-bg"><div class="rev-bar-fill" style="width: 100%;"></div></div>
+            <div class="rev-pct">{p_ratio:.0f}%</div>
+        </div>
+        """
+        
+    mkt_tag = f"<span class='cat-badge'>{prof['market']}</span>"
+    clean_sym = prof['ticker'].replace('.TWO', '').replace('.TW', '')
+    card_html = f"""
+    <div class="industry-panel">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.7rem; flex-wrap:wrap; gap:0.4rem;">
+            <div>
+                <span style="font-size:1.25rem; font-weight:700; color:#fff;">{clean_sym} {prof['name']}</span>
+                <span style="font-size:0.85rem; color:#94a3b8; margin-left:4px;">({prof['ticker']})</span>
+                {mkt_tag}
+            </div>
+            <div>
+                <span class="subind-badge">{prof['sub_industry']}</span>
+                <span class="cat-badge">{prof['category']}</span>
+            </div>
+        </div>
+        <div style="font-size:0.86rem; color:#94a3b8; line-height:1.55; margin-bottom:1rem; border-left:3px solid #64ffda; padding-left:0.6rem;">
+            {prof['business']}
+        </div>
+        <div style="font-weight:600; font-size:0.88rem; color:#ccd6f6; margin-bottom:0.4rem;">
+            📊 實質產品營收佔比結構 (MOPS / CMoney 月產銷組合)
+        </div>
+        {rev_html}
+    </div>
+    """
+    return card_html
+
+
+def render_sidebar_stock_badge(prof, sym, leg_label, color_theme="sky"):
+    clean_sym = sym.replace('.TWO', '').replace('.TW', '')
+    p_name = prof.get('primary_product', '未提供細項')
+    p_ratio = prof.get('primary_ratio', 0.0)
+    sub = prof.get('sub_industry', '未分類')
+    mkt = prof.get('market', '')
+    cat = prof.get('category', '')
+    ratio_str = f"{p_ratio:.1f}%" if p_ratio > 0 else "-"
+    
+    border_class = "stock-badge-card-a" if color_theme == "sky" else "stock-badge-card-b"
+    title_color = "#38bdf8" if color_theme == "sky" else "#f472b6"
+    badge_class = "subind-pill" if color_theme == "sky" else "subind-pill-b"
+    
+    card_html = f"""
+    <div class="stock-badge-card {border_class}">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <span style="font-weight: 700; color: {title_color}; font-size: 0.95rem;">
+                🏢 {clean_sym} {prof['name']}
+            </span>
+            <span class="{badge_class}">
+                {sub}
+            </span>
+        </div>
+        <div style="font-size: 0.78rem; color: #94a3b8; margin-bottom: 2px;">
+            🏷️ <b>市場大類</b>：{mkt} ｜ {cat}
+        </div>
+        <div style="font-size: 0.8rem; color: #e2e8f0;">
+            📦 <b>主力營收</b>：{p_name} <b style="color: {title_color};">({ratio_str})</b>
+        </div>
+    </div>
+    """
+    return card_html
+
+
+def render_sidebar_pair_diagnostic(prof1, prof2, sym1, sym2, sub_pairs):
+    is_same_sub = (prof1['sub_industry'] == prof2['sub_industry']) and (prof1['sub_industry'] not in ['其他', '一般產業'])
+    
+    # 尋找預計算協整資料庫
+    m_pairs = [
+        p for p in sub_pairs 
+        if (p['Ticker1'] == sym1 and p['Ticker2'] == sym2) or (p['Ticker1'] == sym2 and p['Ticker2'] == sym1)
+    ]
+    pair_info = m_pairs[0] if m_pairs else None
+    
+    if is_same_sub:
+        status_html = f"<span style='color: #4ade80; font-weight: 700;'>🟢 同細產業族群 ({prof1['sub_industry']})</span>"
+        desc_text = "核心業務產品高度同質，具備天然協整基礎"
+    else:
+        status_html = f"<span style='color: #fbbf24; font-weight: 700;'>🟡 跨細產業配對</span>"
+        desc_text = f"【{prof1['sub_industry']}】vs【{prof2['sub_industry']}】，留意走勢發散風險"
+        
+    if pair_info:
+        corr_val = pair_info.get('PriceCorr', 0.0)
+        coint_rat = pair_info.get('Rating', '無評級')
+        metric_text = f"走勢相關: <b style='color:#38bdf8;'>{corr_val:+.2f}</b> ｜ 協整: <b style='color:#fbbf24;'>{coint_rat}</b>"
+    else:
+        metric_text = "即時自選標的 ｜ 點擊「🚀 執行回測」開始運算"
+        
+    return f"""
+    <div class="pair-summary-pill">
+        <div style="margin-bottom: 3px;">{status_html}</div>
+        <div style="font-size: 0.75rem; color: #94a3b8; margin-bottom: 3px;">{desc_text}</div>
+        <div style="font-size: 0.75rem; color: #cbd5e1;">📈 {metric_text}</div>
+    </div>
+    """
+
+
+def render_co_movement_banner(prof1, prof2, price_corr=None, ret_corr=None, coint_p=None, hl_str=None):
+    is_same_sub = (prof1['sub_industry'] == prof2['sub_industry']) and (prof1['sub_industry'] not in ['其他', '一般產業'])
+    is_same_cat = (prof1['category'] == prof2['category']) and (prof1['category'] not in ['其他', '其他資產'])
+    
+    if is_same_sub:
+        banner_cls = "diag-banner-green"
+        tag_text = f"🔥 同細產業·高度共振配對 (同屬【{prof1['sub_industry']}】)"
+        msg = f"兩檔標的同屬【{prof1['sub_industry']}】，核心業務產品（{prof1['name']}: {prof1['primary_product']} vs {prof2['name']}: {prof2['primary_product']}）及上下游成本驅動高度同質，基本面價差均值回歸可靠度極高！"
+    elif is_same_cat:
+        banner_cls = "diag-banner-yellow"
+        tag_text = f"⚡ 同大類產業連動配對 (同屬【{prof1['category']}】)"
+        msg = f"兩檔標的同屬大類【{prof1['category']}】，但在細分產品領域不同（{prof1['sub_industry']} vs {prof2['sub_industry']}）。受相同宏觀景氣循環驅動，但需留意個別次產業產品週期之分歧。"
+    else:
+        banner_cls = "diag-banner-red"
+        tag_text = f"⚠️ 跨產業異質標的 (發散風險警示)"
+        msg = f"警告：兩檔標的分屬不同產業（{prof1['sub_industry']} vs {prof2['sub_industry']}），缺乏共同實質營收與成本驅動因子！走勢脫鉤時容易引發單邊發散，強烈建議嚴格設置停損或採用發散模式！"
+
+    metrics_html = []
+    if price_corr is not None:
+        metrics_html.append(f"<div>📈 <b>價格走勢相關度:</b> <span style='font-size:1rem; font-weight:700;'>{price_corr:+.3f}</span></div>")
+    if ret_corr is not None:
+        metrics_html.append(f"<div>⚡ <b>日報酬相關係數:</b> <span style='font-size:1rem; font-weight:700;'>{ret_corr:+.3f}</span></div>")
+    if coint_p is not None:
+        coint_display = f"{coint_p:.4f} (通過協整 ✅)" if coint_p < 0.05 else f"{coint_p:.4f} (未顯著 ⚠️)"
+        metrics_html.append(f"<div>🔬 <b>共整合檢驗 (p-value):</b> <span style='font-size:1rem; font-weight:700;'>{coint_display}</span></div>")
+    if hl_str:
+        metrics_html.append(f"<div>⏱️ <b>OU 均值回歸半衰期:</b> <span style='font-size:1rem; font-weight:700;'>{hl_str}</span></div>")
+
+    metrics_section = ""
+    if metrics_html:
+        metrics_section = f"""
+        <div style="display:flex; flex-wrap:wrap; gap:1.2rem; font-size:0.85rem; padding-top:0.4rem; border-top:1px dashed rgba(255,255,255,0.2);">
+            {''.join(metrics_html)}
+        </div>
+        """
+
+    banner_html = f"""
+    <div class="{banner_cls}">
+        <div style="font-size:1.05rem; font-weight:700; margin-bottom:0.4rem;">{tag_text}</div>
+        <div style="font-size:0.9rem; line-height:1.5; margin-bottom:0.6rem; opacity:0.95;">{msg}</div>
+        {metrics_section}
+    </div>
+    """
+    return banner_html
 
 
 def detect_limit_days(series):
@@ -380,6 +793,15 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     S1 = S1[common_idx].copy()
     S2 = S2[common_idx].copy()
 
+    # Log Price 轉換
+    use_log_price = advanced_params.get('use_log_price', False)
+    if use_log_price:
+        model_S1 = np.log(S1)
+        model_S2 = np.log(S2)
+    else:
+        model_S1 = S1.copy()
+        model_S2 = S2.copy()
+
     # 偵測漲跌停
     limit_s1 = detect_limit_days(S1)
     limit_s2 = detect_limit_days(S2)
@@ -398,29 +820,37 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     for m_type in selected_models:
         m_params = model_params.get(m_type, {})
         if m_type == 'Z-Score (標準)':
-            sdf = get_zscore_signals(S1, S2, m_params.get('z_entry', 2.0), m_params.get('z_exit', 0.0), m_params.get('z_window', 20))
+            sdf = get_zscore_signals(model_S1, model_S2, m_params.get('z_entry', 2.0), m_params.get('z_exit', 0.0), m_params.get('z_window', 20))
         elif m_type == 'OU 過程 (動態邊界)':
-            sdf = get_ou_signals(S1, S2, m_params.get('z_window', 20))
+            sdf = get_ou_signals(model_S1, model_S2, m_params.get('z_window', 20), risk_free_rate=m_params.get('risk_free_rate', 0.015), trading_fee=m_params.get('trading_fee', 0.0004))
         elif m_type == '共整合 + GARCH':
-            sdf = get_garch_signals(S1, S2, m_params.get('z_window', 20), m_params.get('z_entry', 2.0), m_params.get('z_exit', 0.0))
+            sdf = get_garch_signals(model_S1, model_S2, m_params.get('z_window', 20), m_params.get('z_entry', 2.0), m_params.get('z_exit', 0.0), garch_p=m_params.get('garch_p', 1), garch_q=m_params.get('garch_q', 1), garch_dist=m_params.get('garch_dist', 'Normal'))
         elif m_type == '卡爾曼濾波 (動態對沖比例)':
-            sdf = get_kalman_filter_signals(S1, S2, m_params.get('z_window', 20), m_params.get('z_entry', 2.0), m_params.get('z_exit', 0.0))
+            sdf = get_kalman_filter_signals(
+                model_S1, model_S2, 
+                m_params.get('z_window', 20), 
+                m_params.get('z_entry', 2.0), 
+                m_params.get('z_exit', 0.0),
+                kf_q=m_params.get('kf_q', 1e-4),
+                kf_r=m_params.get('kf_r', 1e-3),
+                kf_p0=m_params.get('kf_p0', 1.0)
+            )
         elif m_type == 'Copula (CMPI 機率)':
-            sdf = get_copula_signals(S1, S2, m_params.get('z_window', 20), m_params.get('prob_threshold', 0.95))
+            sdf = get_copula_signals(model_S1, model_S2, m_params.get('z_window', 20), m_params.get('prob_threshold', 0.95), copula_clip_bounds=m_params.get('copula_clip_bounds', 0.001))
         elif m_type == 'Merton 跳躍擴散模型 (過濾結構破裂)':
-            sdf = get_jump_diffusion_signals(S1, S2, m_params.get('z_window', 20), m_params.get('jump_threshold', 3.0), m_params.get('z_entry', 2.0), m_params.get('z_exit', 0.0))
+            sdf = get_jump_diffusion_signals(model_S1, model_S2, m_params.get('z_window', 20), m_params.get('jump_threshold', 3.0), m_params.get('z_entry', 2.0), m_params.get('z_exit', 0.0))
         elif m_type == 'SDDE 隨機延遲方程式 (過濾動能慣性)':
-            sdf = get_sdde_signals(S1, S2, m_params.get('z_window', 20), m_params.get('delay_tau', 5), m_params.get('z_entry', 2.0), m_params.get('z_exit', 0.0))
+            sdf = get_sdde_signals(model_S1, model_S2, m_params.get('z_window', 20), m_params.get('delay_tau', 5), m_params.get('z_entry', 2.0), m_params.get('z_exit', 0.0))
         elif m_type == '非參數 CUSUM (多變量幾何破裂)':
-            sdf = get_np_cusum_signals(S1, S2, m_params.get('cusum_window', 20), m_params.get('k_shift', 1.0), m_params.get('tau_threshold', 5.0), 0.0)
+            sdf = get_np_cusum_signals(model_S1, model_S2, m_params.get('cusum_window', 20), m_params.get('k_shift', 1.0), m_params.get('tau_threshold', 5.0), 0.0)
         elif m_type == 'GSADF (爆炸性泡沫檢定)':
-            sdf = get_gsadf_signals(S1, S2, m_params.get('gsadf_window', 30), m_params.get('adf_threshold', 1.5), 0.0)
+            sdf = get_gsadf_signals(model_S1, model_S2, m_params.get('gsadf_window', 30), m_params.get('adf_threshold', 1.5), 0.0, min_window_pct=m_params.get('min_window_pct', 0.2))
         elif m_type == 'MRS (馬爾可夫區制轉換)':
-            sdf = get_markov_regime_signals(S1, S2, m_params.get('mrs_window', 120), m_params.get('prob_threshold', 0.8), 0.0)
+            sdf = get_markov_regime_signals(model_S1, model_S2, m_params.get('mrs_window', 120), m_params.get('prob_threshold', 0.8), 0.0, switching_variance=m_params.get('switching_variance', True))
         elif m_type == 'DCC-GARCH-VECM (特異性漂移爆發)':
-            sdf = get_dcc_garch_vecm_signals(S1, S2, m_params.get('garch_window', 20), m_params.get('t_threshold', 3.0), 0.0)
+            sdf = get_dcc_garch_vecm_signals(model_S1, model_S2, m_params.get('garch_window', 20), m_params.get('t_threshold', 3.0), 0.0, dcc_span_vol=m_params.get('dcc_span_vol', None), dcc_span_drift=m_params.get('dcc_span_drift', None))
         else:
-            sdf = get_zscore_signals(S1, S2, 2.0, 0.0, 20)
+            sdf = get_zscore_signals(model_S1, model_S2, 2.0, 0.0, 20)
         all_signals.append(sdf)
         
     if not all_signals:
@@ -590,7 +1020,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     
     if not use_grid:
         grid_levels = [{
-            'id': 1, 'pairs': 1
+            'id': 1, 'pairs': advanced_params.get('fixed_pair_multiplier', 1)
         }]
 
     grid_states = []
@@ -1046,14 +1476,55 @@ def main():
 
     tickers = sorted(prices.columns.tolist())
     name_map = get_ticker_names()
+    industry_df = get_industry_data()
+    sub_pairs = get_subindustry_pairs()
+    high_pf_df = get_high_pf_pairs()
 
-    # 建立選項列表 (代號 + 名稱)
-    def fmt_ticker(t):
-        code = t.replace('.TWO', '').replace('.TW', '')
-        name = name_map.get(code, '')
-        return f"{t} ({name})" if name else t
+    # 建立所有標的的個人產業與產品營收結構快取
+    stock_profiles = {}
+    for t in tickers:
+        stock_profiles[t] = get_stock_profile(t, industry_df)
 
-    ticker_options = tickers
+    # 依細產業族群進行歸類
+    sub_industry_dict = {}
+    for t in tickers:
+        sub = stock_profiles[t]['sub_industry']
+        if sub not in sub_industry_dict:
+            sub_industry_dict[sub] = []
+        sub_industry_dict[sub].append(t)
+
+    # 排序可選細產業（至少有 2 檔標的者優先，且依標的數量降冪排列）
+    sorted_subs = sorted(
+        [s for s, t_list in sub_industry_dict.items() if len(t_list) >= 2],
+        key=lambda s: len(sub_industry_dict[s]),
+        reverse=True
+    )
+    other_subs = sorted([s for s, t_list in sub_industry_dict.items() if len(t_list) < 2])
+    all_available_subs = sorted_subs + other_subs
+
+    # 格式化顯示函式 (以代號簡稱為首，確保絕不被截斷)
+    def fmt_ticker_simple(t):
+        prof = stock_profiles.get(t) or get_stock_profile(t, industry_df)
+        clean_t = t.replace('.TWO', '').replace('.TW', '')
+        name = prof['name']
+        p1 = prof['primary_product']
+        r1 = prof['primary_ratio']
+        if r1 > 0 and p1 and p1 != '主要產品':
+            return f"{clean_t} {name} ｜ {p1} {r1:.0f}%"
+        else:
+            return f"{clean_t} {name}"
+
+    def fmt_ticker_grouped(t):
+        prof = stock_profiles.get(t) or get_stock_profile(t, industry_df)
+        clean_t = t.replace('.TWO', '').replace('.TW', '')
+        name = prof['name']
+        sub = prof['sub_industry']
+        p1 = prof['primary_product']
+        r1 = prof['primary_ratio']
+        if r1 > 0 and p1 and p1 != '主要產品':
+            return f"{clean_t} {name} ｜ {sub} ({r1:.0f}%)"
+        else:
+            return f"{clean_t} {name} ｜ {sub}"
 
     # ============================================================
     # 側邊欄: 參數設定
@@ -1063,26 +1534,125 @@ def main():
         st.markdown("---")
 
         st.markdown("### 📌 選擇配對標的")
-        col_a, col_b = st.columns(2)
-        
-        # 預設選擇 1513 和 6414
-        default_s1 = tickers.index('1513.TW') if '1513.TW' in tickers else 0
-        default_s2 = tickers.index('6414.TW') if '6414.TW' in tickers else 1
+        pair_mode = st.radio(
+            "標的挑選模式",
+            ["🎯 依細產業族群挑選 (推薦·高連動)", "🌐 全市場自選 (依細產業排序)"],
+            index=0,
+            help="【依細產業族群挑選】：僅篩選同一細產業之同業標的，具備高度產品營收連動性與協整基礎，大幅降低走勢發散風險！"
+        )
 
-        sym1 = st.selectbox(
-            "標的 A (Leg 1)",
-            ticker_options,
-            index=default_s1,
-            format_func=fmt_ticker,
-            key='sym1'
-        )
-        sym2 = st.selectbox(
-            "標的 B (Leg 2)",
-            ticker_options,
-            index=default_s2,
-            format_func=fmt_ticker,
-            key='sym2'
-        )
+        if pair_mode == "🎯 依細產業族群挑選 (推薦·高連動)":
+            default_sub = "銅箔基板 (CCL)" if "銅箔基板 (CCL)" in all_available_subs else (sorted_subs[0] if sorted_subs else all_available_subs[0])
+            sel_sub_idx = all_available_subs.index(default_sub) if default_sub in all_available_subs else 0
+            selected_sub = st.selectbox(
+                "🏷️ 選擇細產業族群",
+                all_available_subs,
+                index=sel_sub_idx,
+                help="選擇特定的細產業族群，系統將自動篩選該族群內的所有標的"
+            )
+            sub_tickers = sub_industry_dict.get(selected_sub, tickers)
+            
+            # 尋找該細產業內的獲利因子 > 3.0 推薦配對
+            sub_high_pf = high_pf_df[high_pf_df['SubIndustry'] == selected_sub] if high_pf_df is not None and not high_pf_df.empty else pd.DataFrame()
+            chosen_hp = None
+            if not sub_high_pf.empty:
+                hp_labels = ["-- 手動挑選下方標的 --"] + [
+                    f"🔥 {r['Name1']} vs {r['Name2']} ｜ PF {r['ProfitFactor']:.2f} ｜ 勝率 {r['WinRate']:.1f}% ｜ 報酬 {r['TotalReturnPct']:+.1f}%"
+                    for _, r in sub_high_pf.iterrows()
+                ]
+                chosen_hp = st.selectbox("🔥 該族群獲利因子 > 3.0 精選配對 (一鍵帶入)", hp_labels, index=0)
+                if chosen_hp != hp_labels[0]:
+                    h_idx = hp_labels.index(chosen_hp) - 1
+                    target_row = sub_high_pf.iloc[h_idx]
+                    default_s1 = sub_tickers.index(target_row['Ticker1']) if target_row['Ticker1'] in sub_tickers else 0
+                    default_s2 = sub_tickers.index(target_row['Ticker2']) if target_row['Ticker2'] in sub_tickers else (1 if len(sub_tickers) > 1 else 0)
+
+            # 尋找該細產業內的推薦配對 (來自 pre-computed 協整資料)
+            if not chosen_hp or chosen_hp == hp_labels[0]:
+                rec_pairs_for_sub = [
+                    p for p in sub_pairs 
+                    if p.get('SubIndustry') == selected_sub and p.get('Ticker1') in sub_tickers and p.get('Ticker2') in sub_tickers
+                ]
+                
+                if rec_pairs_for_sub:
+                    rec_pair_labels = ["-- 手動挑選下方標的 --"] + [
+                        f"{p['Pair']} ({p['Name1']} vs {p['Name2']}) ｜ r={p['PriceCorr']:+.2f} ｜ {p['Rating']}"
+                        for p in rec_pairs_for_sub[:15]
+                    ]
+                    chosen_rec = st.selectbox("💡 該族群高協整/高相關配對 (一鍵帶入)", rec_pair_labels, index=0)
+                    if chosen_rec != "-- 手動挑選下方標的 --":
+                        rec_idx = rec_pair_labels.index(chosen_rec) - 1
+                        target_pair = rec_pairs_for_sub[rec_idx]
+                        default_s1 = sub_tickers.index(target_pair['Ticker1']) if target_pair['Ticker1'] in sub_tickers else 0
+                        default_s2 = sub_tickers.index(target_pair['Ticker2']) if target_pair['Ticker2'] in sub_tickers else (1 if len(sub_tickers) > 1 else 0)
+                    else:
+                        default_s1 = 0
+                        default_s2 = 1 if len(sub_tickers) > 1 else 0
+                else:
+                    default_s1 = 0
+                    default_s2 = 1 if len(sub_tickers) > 1 else 0
+
+            st.markdown("#### 🅰️ 標的 A (Leg 1)")
+            sym1 = st.selectbox("標的 A (Leg 1)", sub_tickers, index=default_s1, format_func=fmt_ticker_simple, key='sym1', label_visibility="collapsed")
+            st.markdown(render_sidebar_stock_badge(stock_profiles[sym1], sym1, "A", "sky"), unsafe_allow_html=True)
+
+            st.markdown("#### 🅱️ 標的 B (Leg 2)")
+            sym2 = st.selectbox("標的 B (Leg 2)", sub_tickers, index=default_s2, format_func=fmt_ticker_simple, key='sym2', label_visibility="collapsed")
+            st.markdown(render_sidebar_stock_badge(stock_profiles[sym2], sym2, "B", "pink"), unsafe_allow_html=True)
+
+        else:
+            # 全市場自選: 依細產業分組排序
+            sorted_all_tickers = sorted(
+                tickers,
+                key=lambda t: (stock_profiles[t]['sub_industry'], t)
+            )
+            default_s1 = sorted_all_tickers.index('2383.TW') if '2383.TW' in sorted_all_tickers else 0
+            default_s2 = sorted_all_tickers.index('6213.TW') if '6213.TW' in sorted_all_tickers else (sorted_all_tickers.index('6274.TWO') if '6274.TWO' in sorted_all_tickers else 1)
+
+            # 全市場獲利因子 > 3.0 推薦一鍵帶入
+            chosen_pf = None
+            if high_pf_df is not None and not high_pf_df.empty:
+                pf_labels = ["-- 手動挑選下方全市場標的 --"] + [
+                    f"🔥 [{r['SubIndustry']}] {r['Name1']} vs {r['Name2']} ｜ PF {r['ProfitFactor']:.2f} ｜ 勝率 {r['WinRate']:.1f}% ｜ 報酬 {r['TotalReturnPct']:+.1f}%"
+                    for _, r in high_pf_df.iterrows()
+                ]
+                chosen_pf = st.selectbox("🔥 獲利因子 > 3.0 同業精選 (一鍵帶入)", pf_labels, index=0)
+                if chosen_pf != pf_labels[0]:
+                    p_idx = pf_labels.index(chosen_pf) - 1
+                    target_row = high_pf_df.iloc[p_idx]
+                    t1, t2 = target_row['Ticker1'], target_row['Ticker2']
+                    if t1 in sorted_all_tickers:
+                        default_s1 = sorted_all_tickers.index(t1)
+                    if t2 in sorted_all_tickers:
+                        default_s2 = sorted_all_tickers.index(t2)
+
+            # 全市場高協整推薦一鍵帶入
+            if not chosen_pf or chosen_pf == pf_labels[0]:
+                coint_top = [p for p in sub_pairs if p.get('IsCointegrated') or p.get('CointPValue', 1.0) < 0.05][:20]
+                if coint_top:
+                    coint_labels = ["-- 手動挑選下方全市場標的 --"] + [
+                        f"{p['Pair']} ({p['Name1']} vs {p['Name2']}) · {p['SubIndustry']} ｜ {p['Rating']}"
+                        for p in coint_top
+                    ]
+                    chosen_coint = st.selectbox("💡 全市場精選高協整配對 (一鍵帶入)", coint_labels, index=0)
+                    if chosen_coint != coint_labels[0]:
+                        c_idx = coint_labels.index(chosen_coint) - 1
+                        tp = coint_top[c_idx]
+                        if tp['Ticker1'] in sorted_all_tickers:
+                            default_s1 = sorted_all_tickers.index(tp['Ticker1'])
+                        if tp['Ticker2'] in sorted_all_tickers:
+                            default_s2 = sorted_all_tickers.index(tp['Ticker2'])
+
+            st.markdown("#### 🅰️ 標的 A (Leg 1)")
+            sym1 = st.selectbox("標的 A (Leg 1)", sorted_all_tickers, index=default_s1, format_func=fmt_ticker_grouped, key='sym1', label_visibility="collapsed")
+            st.markdown(render_sidebar_stock_badge(stock_profiles[sym1], sym1, "A", "sky"), unsafe_allow_html=True)
+
+            st.markdown("#### 🅱️ 標的 B (Leg 2)")
+            sym2 = st.selectbox("標的 B (Leg 2)", sorted_all_tickers, index=default_s2, format_func=fmt_ticker_grouped, key='sym2', label_visibility="collapsed")
+            st.markdown(render_sidebar_stock_badge(stock_profiles[sym2], sym2, "B", "pink"), unsafe_allow_html=True)
+
+        # 側邊欄配對關係總結 Pill
+        st.markdown(render_sidebar_pair_diagnostic(stock_profiles[sym1], stock_profiles[sym2], sym1, sym2, sub_pairs), unsafe_allow_html=True)
 
         if sym1 == sym2:
             st.warning("請選擇兩檔不同的標的！")
@@ -1095,8 +1665,8 @@ def main():
         latest_date = prices.index.max().date()
         today_date = datetime.date.today()
         
-        # 預設起點設為 2020-01-02
-        default_start = datetime.date(2020, 1, 2) if datetime.date(2020, 1, 2) >= min_date else min_date
+        # 預設起點設為 2022-01-01
+        default_start = datetime.date(2022, 1, 1) if datetime.date(2022, 1, 1) >= min_date else min_date
         
         col_start, col_end = st.columns(2)
         with col_start:
@@ -1123,12 +1693,16 @@ def main():
                              help="選擇是否要讓系統自動把資金運用到極限")
         
         margin_usage_pct = 1.0
+        fixed_pair_multiplier = 1
         if size_mode == '依保證金上限最大化（預設）':
             margin_usage_pct = st.slider("最高保證金利用率 (%)", 0, 100, 100, 5, help="限制這筆資金最高只能被利用的比例") / 100.0
+        else:
+            fixed_pair_multiplier = st.slider("固定配對口數倍數", 1, 10, 1, 1, help="調整基本單位的倍數 (例如設定2代表每次進場2組基本配對)")
 
         st.markdown("---")
         st.markdown("### 🧭 交易邏輯與方向")
         trade_mode = st.radio("配對策略邏輯", ['收斂 (均值回歸)', '發散 (趨勢跟蹤)'], index=0, help="收斂：突破上界做空，跌破下界做多；發散：突破上界做多，跌破下界做空。")
+        use_log_price = st.toggle("對數價格轉換 (Log Price)", value=False, help="將價格取自然對數後再計算價差。能將比例關係轉為加法關係，適合長期配對或價格落差大的標的。")
         
         st.markdown("---")
         st.markdown("### 📐 數學模型與參數設定")
@@ -1158,16 +1732,39 @@ def main():
         for idx, model_type in enumerate(selected_models):
             st.markdown(f"#### {idx+1}. {model_type} 參數")
             m_params = {}
-            if model_type == 'Z-Score (標準)' or model_type == '共整合 + GARCH' or model_type == '卡爾曼濾波 (動態對沖比例)':
+            if model_type == 'Z-Score (標準)':
                 m_params['z_entry'] = st.slider("開倉閾值 (Z絕對值, 進場 ±Z)", 0.1, 5.0, 2.0, 0.1, help="調整進場的敏銳度，數值越小交易越頻繁", key=f"z_entry_{idx}_{model_type}")
                 m_params['z_exit'] = st.slider("平倉閾值 (Z 回歸)", -2.0, 2.0, 0.0, 0.1, help="當指標回歸到此數值時平倉", key=f"z_exit_{idx}_{model_type}")
-                m_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, help="用於計算標準差或卡爾曼標準化", key=f"z_window_{idx}_{model_type}")
+                m_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, help="用於計算標準差", key=f"z_window_{idx}_{model_type}")
+            elif model_type == '共整合 + GARCH':
+                m_params['z_entry'] = st.slider("開倉閾值 (Z絕對值, 進場 ±Z)", 0.1, 5.0, 2.0, 0.1, help="調整進場的敏銳度，數值越小交易越頻繁", key=f"z_entry_{idx}_{model_type}")
+                m_params['z_exit'] = st.slider("平倉閾值 (Z 回歸)", -2.0, 2.0, 0.0, 0.1, help="當指標回歸到此數值時平倉", key=f"z_exit_{idx}_{model_type}")
+                m_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, help="用於計算標準差", key=f"z_window_{idx}_{model_type}")
+                st.markdown("##### GARCH 模型進階參數")
+                m_params['garch_p'] = st.slider("GARCH(p) 階數", 1, 3, 1, 1, help="控制過去變異數的影響力", key=f"gp_{idx}_{model_type}")
+                m_params['garch_q'] = st.slider("GARCH(q) 階數", 1, 3, 1, 1, help="控制過去殘差的影響力", key=f"gq_{idx}_{model_type}")
+                m_params['garch_dist'] = st.selectbox("殘差分配假設 (Distribution)", ['Normal', 't', 'skewt'], index=0, help="選擇厚尾分佈可更快適應極端行情", key=f"gd_{idx}_{model_type}")
+            elif model_type == '卡爾曼濾波 (動態對沖比例)':
+                m_params['z_entry'] = st.slider("開倉閾值 (Z絕對值, 進場 ±Z)", 0.1, 5.0, 2.0, 0.1, help="調整進場的敏銳度，數值越小交易越頻繁", key=f"z_entry_{idx}_{model_type}")
+                m_params['z_exit'] = st.slider("平倉閾值 (Z 回歸)", -2.0, 2.0, 0.0, 0.1, help="當指標回歸到此數值時平倉", key=f"z_exit_{idx}_{model_type}")
+                m_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, help="用於計算卡爾曼標準化", key=f"z_window_{idx}_{model_type}")
+                st.markdown("##### 卡爾曼濾波進階參數")
+                q_options = [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
+                q_format = {1e-2: "1e-2 (極高靈敏)", 1e-3: "1e-3 (高靈敏)", 1e-4: "1e-4 (標準/常用)", 1e-5: "1e-5 (平滑)", 1e-6: "1e-6 (極度平滑)"}
+                m_params['kf_q'] = st.selectbox("過程雜訊協方差 (Q)", q_options, index=2, format_func=lambda x: q_format[x], help="決定對沖比率隨時間變動的速度。調大會對新數據更敏感，但也更容易受短期雜訊干擾。", key=f"kf_q_{idx}_{model_type}")
+                m_params['kf_r'] = st.selectbox("量測雜訊協方差 (R)", [1e-1, 1e-2, 1e-3, 1e-4], index=2, format_func=lambda x: f"{x:g}", help="代表價格本身的隨機波動大小。通常固定為 1e-3，與 Q 的比例決定濾波特徵。", key=f"kf_r_{idx}_{model_type}")
+                m_params['kf_p0'] = st.number_input("初始狀態協方差 (P0)", min_value=0.1, max_value=10.0, value=1.0, step=0.1, help="影響剛開始運行時的收斂速度。數值大代表初期修正快，但隨時間推移影響遞減。", key=f"kf_p0_{idx}_{model_type}")
             elif model_type == 'OU 過程 (動態邊界)':
                 m_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, help="用於擬合 OU 過程參數 (Theta, Mu, Sigma)", key=f"ou_window_{idx}_{model_type}")
-                st.info("OU 模型會自動根據均值回歸速度(Theta)與波動率計算動態上下界，無須手動設定固定閾值。")
+                st.markdown("##### OU 進階參數")
+                m_params['risk_free_rate'] = st.number_input("無風險利率", min_value=0.000, max_value=0.050, value=0.015, step=0.001, format="%.3f", help="影響進場邊界計算", key=f"rf_{idx}_{model_type}")
+                m_params['trading_fee'] = st.number_input("單邊手續費率", min_value=0.0000, max_value=0.0100, value=0.0004, step=0.0001, format="%.4f", help="影響平倉邊界寬度", key=f"tf_{idx}_{model_type}")
+                st.info("OU 模型會自動根據均值回歸速度(Theta)、波動率及上方設定的資金成本計算動態上下界，無須手動設定固定閾值。")
             elif model_type == 'Copula (CMPI 機率)':
                 m_params['prob_threshold'] = st.slider("條件機率閾值 (CMPI)", 0.500, 0.999, 0.950, 0.001, format="%.3f", help="達到多少極端機率才開倉 (0.5以上)", key=f"cp_{idx}_{model_type}")
                 m_params['z_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, help="用於擬合 Copula 相關性與累積分配函數", key=f"cw_{idx}_{model_type}")
+                st.markdown("##### Copula 進階參數")
+                m_params['copula_clip_bounds'] = st.number_input("極端值截斷閾值", min_value=0.0001, max_value=0.0500, value=0.0010, step=0.0001, format="%.4f", help="避免 Infinity 的百分位數極限", key=f"cb_{idx}_{model_type}")
             elif model_type == 'Merton 跳躍擴散模型 (過濾結構破裂)':
                 m_params['z_entry'] = st.slider("開倉閾值 (Z絕對值, 進場 ±Z)", 0.1, 5.0, 2.0, 0.1, key=f"je_{idx}_{model_type}")
                 m_params['z_exit'] = st.slider("平倉閾值 (Z 回歸)", -2.0, 2.0, 0.0, 0.1, key=f"jx_{idx}_{model_type}")
@@ -1189,15 +1786,24 @@ def main():
                 st.markdown("##### GSADF 參數")
                 m_params['gsadf_window'] = st.slider("滾動窗口 (天)", 15, 500, 30, 1, key=f"gw_{idx}_{model_type}")
                 m_params['adf_threshold'] = st.slider("ADF t-統計量 閾值", 0.5, 4.0, 1.5, 0.1, key=f"gt_{idx}_{model_type}")
+                st.markdown("##### GSADF 進階參數")
+                m_params['min_window_pct'] = st.slider("初始樣本涵蓋比例", 0.1, 0.5, 0.2, 0.05, help="決定 SADF 內部擴展檢定的最小 K 棒數量比例", key=f"gm_{idx}_{model_type}")
             elif model_type == 'MRS (馬爾可夫區制轉換)':
                 st.markdown("##### MRS 參數")
                 m_params['mrs_window'] = st.slider("滾動窗口 (天)", 30, 500, 120, 5, key=f"mw_{idx}_{model_type}")
                 m_params['prob_threshold'] = st.slider("發散區制機率閾值", 0.5, 0.99, 0.8, 0.05, key=f"mp_{idx}_{model_type}")
+                st.markdown("##### MRS 進階參數")
+                m_params['switching_variance'] = st.toggle("切換變異數 (Switching Variance)", value=True, help="決定兩個市場狀態 (Regimes) 的波動率是否允許不同", key=f"sv_{idx}_{model_type}")
                 st.info("⚠️ MRS 模型內部使用 MLE 估計轉移矩陣，計算極度耗時。")
             elif model_type == 'DCC-GARCH-VECM (特異性漂移爆發)':
                 st.markdown("##### DCC-GARCH 參數")
                 m_params['garch_window'] = st.slider("滾動窗口 (天)", 5, 500, 20, 1, key=f"dc_w_{idx}_{model_type}")
                 m_params['t_threshold'] = st.slider("爆發 t-統計量閾值", 1.0, 10.0, 3.0, 0.5, key=f"dc_t_{idx}_{model_type}")
+                st.markdown("##### DCC-GARCH 進階參數")
+                _vol_span = st.number_input("條件波動率半衰期 (0=自動)", min_value=0, max_value=100, value=0, step=1, help="GARCH(1,1) 的 EMA 逼近參數。設 0 為自動 (Window/2)", key=f"dv_{idx}_{model_type}")
+                _drift_span = st.number_input("局部漂移半衰期 (0=自動)", min_value=0, max_value=50, value=0, step=1, help="漂移項計算。設 0 為自動 (Window/5)", key=f"dd_{idx}_{model_type}")
+                m_params['dcc_span_vol'] = _vol_span if _vol_span > 0 else None
+                m_params['dcc_span_drift'] = _drift_span if _drift_span > 0 else None
             model_params[model_type] = m_params
 
         st.markdown("---")
@@ -1309,6 +1915,7 @@ def main():
             }
             
             advanced_params['trade_mode'] = trade_mode  # Pass trade_mode via advanced_params
+            advanced_params['fixed_pair_multiplier'] = fixed_pair_multiplier
             
             df_records, df_trades, stats = run_backtest(
         S1, S2, sym1, sym2, name1, name2, initial_capital, 
@@ -1318,24 +1925,39 @@ def main():
                 advanced_params=advanced_params
             )
 
-        # --- 產業資訊摘要 ---
+        # --- 🏢 標的細產業分類與產品營收結構深度對比 ---
         industry_df = get_industry_data()
-        if industry_df is not None:
-            ind1 = industry_df.loc[sym1] if sym1 in industry_df.index else pd.Series({'Industry': '未知', 'Business': '未知'})
-            ind2 = industry_df.loc[sym2] if sym2 in industry_df.index else pd.Series({'Industry': '未知', 'Business': '未知'})
-            
-            st.markdown("## 🏢 標的產業與營收來源")
-            ind_col1, ind_col2 = st.columns(2)
-            with ind_col1:
-                st.info(f"**{sym1} ({name1})**\n\n**產業類別**: {ind1.get('Industry', '未知')}\n\n**主要業務**: {ind1.get('Business', '未知')}")
-            with ind_col2:
-                st.info(f"**{sym2} ({name2})**\n\n**產業類別**: {ind2.get('Industry', '未知')}\n\n**主要業務**: {ind2.get('Business', '未知')}")
+        prof1 = get_stock_profile(sym1, industry_df)
+        prof2 = get_stock_profile(sym2, industry_df)
+        
+        st.markdown("## 🏢 標的細產業分類與產品營收結構深度對比")
+        
+        # 1. 兩檔標的並排卡片
+        col_card1, col_card2 = st.columns(2)
+        with col_card1:
+            st.markdown(render_stock_card(prof1), unsafe_allow_html=True)
+        with col_card2:
+            st.markdown(render_stock_card(prof2), unsafe_allow_html=True)
+
+        # 2. 產業同質性與走勢連動診斷 Banner
+        p1_common = S1.loc[S1.index.intersection(S2.index)]
+        p2_common = S2.loc[p1_common.index]
+        price_corr = p1_common.corr(p2_common)
+        ret_corr = p1_common.pct_change().dropna().corr(p2_common.pct_change().dropna())
+        coint_p = stats.get('coint_pvalue')
+        hl_str = f"{stats.get('avg_ou_half_life'):.1f} 天" if stats.get('avg_ou_half_life') else "無顯著回歸"
+
+        st.markdown(render_co_movement_banner(prof1, prof2, price_corr=price_corr, ret_corr=ret_corr, coint_p=coint_p, hl_str=hl_str), unsafe_allow_html=True)
 
         if stats.get('insufficient_margin_error', False):
             if 'msg' in stats:
-                st.error(f"❌ **回測執行攔截：**\n\n{stats['msg']}")
+                st.error(f"""❌ **回測執行攔截：**
+
+{stats['msg']}""")
             else:
-                st.error(f"❌ **保證金不足無法下單！**\n\n您設定的可用保證金 ({initial_capital * margin_usage_pct:,.0f} 元) 不足以下單即使是最少的 {stats.get('base_s1',0)}口/{stats.get('base_s2',0)}口 (需 {stats.get('base_margin',0):,.0f} 元)。請增加資金或選擇較低價標的。")
+                st.error(f"""❌ **保證金不足無法下單！**
+
+您設定的可用保證金 ({initial_capital * margin_usage_pct:,.0f} 元) 不足以下單即使是最少的 {stats.get('base_s1',0)}口/{stats.get('base_s2',0)}口 (需 {stats.get('base_margin',0):,.0f} 元)。請增加資金或選擇較低價標的。""")
             return
 
         # --- 保證金計算摘要 ---
@@ -1686,14 +2308,52 @@ def main():
                              f"daily_records_{sym1}_{sym2}.csv", "text/csv")
 
     else:
-        # 尚未執行回測，顯示使用說明
-        st.markdown("""
-        <div class="info-box">
+        # 尚未執行回測，即時展示當前選定標的之細產業與產品營收結構深度對比
+        prof1 = stock_profiles.get(sym1) or get_stock_profile(sym1, industry_df)
+        prof2 = stock_profiles.get(sym2) or get_stock_profile(sym2, industry_df)
+
+        st.markdown(f"## 🎯 當前選定配對：{prof1['code']} {prof1['name']}  ⚡  {prof2['code']} {prof2['name']}")
+        st.caption("👈 透過左側側邊欄自由挑選或一鍵帶入，中央即時預覽兩檔標的之實質產品營收佔比、細產業所屬與基本面連動關係：")
+
+        col_c1, col_c2 = st.columns(2)
+        with col_c1:
+            st.markdown(render_stock_card(prof1), unsafe_allow_html=True)
+        with col_c2:
+            st.markdown(render_stock_card(prof2), unsafe_allow_html=True)
+
+        # 快速取得或計算兩者之走勢連動指標
+        p_corr = None
+        r_corr = None
+        c_pval = None
+        m_pairs = [p for p in sub_pairs if (p['Ticker1'] == sym1 and p['Ticker2'] == sym2) or (p['Ticker1'] == sym2 and p['Ticker2'] == sym1)]
+        if m_pairs:
+            p_corr = m_pairs[0].get('PriceCorr')
+            r_corr = m_pairs[0].get('ReturnCorr')
+            c_pval = m_pairs[0].get('CointPValue')
+        elif prices is not None and sym1 in prices.columns and sym2 in prices.columns:
+            s1_sub = prices[sym1].dropna()
+            s2_sub = prices[sym2].dropna()
+            comm = s1_sub.index.intersection(s2_sub.index)[-250:]
+            if len(comm) > 30:
+                p_corr = float(s1_sub[comm].corr(s2_sub[comm]))
+                r_corr = float(s1_sub[comm].pct_change().corr(s2_sub[comm].pct_change()))
+            if len(comm) > 60:
+                try:
+                    _, c_pval, _ = coint(s1_sub[comm], s2_sub[comm])
+                except:
+                    pass
+
+        st.markdown(render_co_movement_banner(prof1, prof2, price_corr=p_corr, ret_corr=r_corr, coint_p=c_pval), unsafe_allow_html=True)
+
+        st.info("👈 **標的已就緒！** 可在左側側邊欄調整交易策略、模型與資金管理設定，並點擊「🚀 執行回測」開始完整運算。")
+
+        with st.expander("📌 配對交易規則、保證金機制與操作指引", expanded=False):
+            st.markdown("""
             <b>🎯 使用方式</b><br>
-            1. 從左側選單中選擇兩檔想配對的股期標的<br>
-            2. 設定初始保證金金額<br>
-            3. 調整 Z-Score 開倉/平倉閾值與滾動窗口<br>
-            4. 點擊「🚀 執行回測」查看完整結果<br>
+            1. 從左側選單中選擇兩檔想配對的股期標的（系統預設提供同細產業高協整與高相關配對）<br>
+            2. 設定初始保證金金額與資金佈局模式<br>
+            3. 選擇數學模型（收斂模型或發散模型）並調整敏感度參數<br>
+            4. 點擊「🚀 執行回測」查看累積損益、夏普值、回撤與逐日交易明細<br>
             <br>
             <b>📌 交易規則</b><br>
             • 指標 > 上界閾值 → 做空 Spread（空標的B + 多標的A）<br>
@@ -1701,19 +2361,93 @@ def main():
             • 指標回歸平倉線 → 平倉<br>
             • 漲跌停日（±10%）自動跳過，不會產生無法成交的虛假訊號<br>
             • 每月第 3 個禮拜三結算日自動平倉，次日以新價格重新建倉（含轉倉成本）
-        </div>
-        """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
 
-        # 顯示可用標的列表
-        st.markdown("### 📋 可用標的清單")
-        st.markdown(f"共 **{len(tickers)}** 檔標的（取自期交所股票期貨掛牌名單，已過濾有完整 5 年資料者）")
+        # 0. 🔥 獲利因子大於 3.0 同細產業高勝率精選配對總表
+        if high_pf_df is not None and not high_pf_df.empty:
+            st.markdown("### 🔥 獲利因子大於 3.0 同細產業精選配對排行榜")
+            st.markdown("""
+            全市場 50 個同細產業族群、**1,094 組同業配對**全面嚴格回測（**基礎 Z-Score 模型 · 固定 100 萬保證金 · 最少配對 1 組基本單位**），
+            篩選出 **獲利因子 (Profit Factor) > 3.0** 之高勝率、低回撤同業配對：
+            """)
+            display_pf_rows = []
+            for _, r in high_pf_df.iterrows():
+                display_pf_rows.append({
+                    '細產業族群': r['SubIndustry'],
+                    '配對組合': f"{r['Name1']} ({r['Ticker1']}) vs {r['Name2']} ({r['Ticker2']})",
+                    '獲利因子': f"🔥 {r['ProfitFactor']:.2f}",
+                    '總報酬 (元)': f"+{r['TotalReturn']:,.0f}",
+                    '總報酬率': f"+{r['TotalReturnPct']:.1f}%",
+                    '年化報酬': f"+{r['AnnualizedReturn']:.1f}%",
+                    '勝率': f"{r['WinRate']:.1f}%",
+                    '交易次數': f"{r['TotalTrades']} 次 ({r['WinTrades']}勝/{r['LoseTrades']}敗)",
+                    '最大回撤 (MDD)': f"{r['MaxDrawdownPct']:.1f}%",
+                    '夏普值': f"{r['SharpeRatio']:.2f}",
+                    '基本口數': r['BaseContracts'],
+                    '基本保證金': f"{r['BaseMargin']:,.0f} 元",
+                    'A 主力產品': r['Prod1'],
+                    'B 主力產品': r['Prod2'],
+                    '走勢相關度': f"{r['PriceCorr']:+.2f}",
+                    '協整 p值': f"{r['CointPValue']:.4f}"
+                })
+            st.dataframe(pd.DataFrame(display_pf_rows), use_container_width=True, height=360)
+            st.markdown("---")
+
+        # 1. 🏆 推薦同細產業高協整配對排行榜
+        st.markdown("### 🏆 推薦同細產業高協整配對排行榜 (Pairs Universe)")
+        st.markdown("透過 MOPS/CMoney 實質產品營收細分驗證，並經嚴格 **Engle-Granger 協整檢驗 (p < 0.05)** 與走勢相關度排序之優質配對池：")
+        
+        if sub_pairs:
+            top_coint_pairs = [p for p in sub_pairs if p.get('IsCointegrated') or p.get('CointPValue', 1.0) < 0.05][:20]
+            if top_coint_pairs:
+                df_top_coint = pd.DataFrame([
+                    {
+                        '細產業族群': p['SubIndustry'],
+                        '配對組合': p['Pair'],
+                        '標的 A': p['Name1'],
+                        '標的 B': p['Name2'],
+                        'A 主力產品': p['Prod1'],
+                        'B 主力產品': p['Prod2'],
+                        '價格走勢相關度': f"{p['PriceCorr']:+.3f}",
+                        '日報酬相關係數': f"{p['ReturnCorr']:+.3f}",
+                        '協整 p-value': f"{p['CointPValue']:.4f}",
+                        '連動評級': p['Rating']
+                    }
+                    for p in top_coint_pairs
+                ])
+                st.dataframe(df_top_coint, use_container_width=True, height=330)
+            else:
+                st.info("尚無預先計算之協整配對資料。")
+
+        st.markdown("---")
+
+        # 2. 🏢 股期細產業地圖與實質產品營收總表
+        st.markdown("### 🏢 股期細產業地圖與實質產品營收總表")
+        st.markdown(f"共收錄 **{len(tickers)}** 檔標的之最新產品營收結構與業務明細（資料源：MOPS / CMoney 月產銷組合）：")
+
+        # 細產業篩選器
+        filter_sub_opts = ["🌐 全部細產業 (顯示全部)"] + all_available_subs
+        chosen_filter_sub = st.selectbox("🔎 依細產業過濾標的：", filter_sub_opts, index=0)
 
         ticker_display = []
         for t in tickers:
-            code = t.replace('.TWO', '').replace('.TW', '')
-            name = name_map.get(code, '')
-            ticker_display.append({'代號': t, '簡稱': name, '市場': 'TWSE' if '.TW' in t else 'TPEx'})
-        st.dataframe(pd.DataFrame(ticker_display), use_container_width=True, height=300)
+            prof = stock_profiles.get(t) or get_stock_profile(t, industry_df)
+            sub = prof['sub_industry']
+            if chosen_filter_sub != "🌐 全部細產業 (顯示全部)" and sub != chosen_filter_sub:
+                continue
+            ticker_display.append({
+                '代號': t,
+                '簡稱': prof['name'],
+                '市場': prof['market'],
+                '細產業類別': sub,
+                '大產業大類': prof['category'],
+                '主力營收產品': prof['primary_product'],
+                '主力比重 (%)': f"{prof['primary_ratio']:.1f}%" if prof['primary_ratio'] > 0 else "-",
+                '產品營收明細 (Top 1~5)': prof['product_breakdown'],
+                '公司主要業務說明': prof['business']
+            })
+
+        st.dataframe(pd.DataFrame(ticker_display), use_container_width=True, height=450)
 
 
 if __name__ == '__main__':

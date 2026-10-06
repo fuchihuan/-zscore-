@@ -1,0 +1,11 @@
+Z-Score (標準)
+OU 過程 (動態邊界)
+共整合 + GARCH
+卡爾曼濾波 (動態對沖比例)
+Copula (CMPI 機率)
+Merton 跳躍擴散模型 (過濾結構破裂)
+SDDE 隨機延遲方程式 (過濾動能慣性)
+非參數 CUSUM (多變量幾何破裂)
+GSADF (爆炸性泡沫檢定)
+MRS (馬爾可夫區制轉換)
+DCC-GARCH-VECM (特異性漂移爆發)

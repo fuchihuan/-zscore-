@@ -4,6 +4,8 @@ import statsmodels.api as sm
 from scipy.stats import norm, t
 from arch import arch_model
 
+from statsmodels.regression.rolling import RollingOLS
+
 def get_zscore_signals(S1, S2, z_entry, z_exit, window):
     X = sm.add_constant(S1)
     model = sm.OLS(S2, X).fit()
@@ -106,9 +108,10 @@ def get_ou_signals(S1, S2, window, risk_free_rate=0.015, trading_fee=0.0004):
     })
     return df.dropna()
 
-def get_garch_signals(S1, S2, window, z_entry=2.0, z_exit=0.0):
+def get_garch_signals(S1, S2, window, z_entry=2.0, z_exit=0.0, garch_p=1, garch_q=1, garch_dist='Normal'):
     """
-    Cointegration + GARCH(1,1) dynamic volatility
+    Cointegration + GARCH(p,q) Model
+    Calculates z-score using GARCH dynamic volatility
     """
     X = sm.add_constant(S1)
     model = sm.OLS(S2, X).fit()
@@ -125,7 +128,7 @@ def get_garch_signals(S1, S2, window, z_entry=2.0, z_exit=0.0):
         if len(resids) > 20:
             try:
                 scale = 100.0 / resids.std()
-                am = arch_model(resids * scale, vol='Garch', p=1, q=1, dist='Normal', rescale=False)
+                am = arch_model(resids * scale, vol='Garch', p=garch_p, q=garch_q, dist=garch_dist, rescale=False)
                 res = am.fit(disp='off', show_warning=False)
                 forecasts = res.forecast(horizon=5)
                 pred_var = forecasts.variance.iloc[-1].values
@@ -154,7 +157,7 @@ def get_garch_signals(S1, S2, window, z_entry=2.0, z_exit=0.0):
     })
     return df.dropna()
 
-def get_kalman_filter_signals(S1, S2, window=60, z_entry=2.0, z_exit=0.0):
+def get_kalman_filter_signals(S1, S2, window=60, z_entry=2.0, z_exit=0.0, kf_q=1e-4, kf_r=1e-3, kf_p0=1.0):
     """
     Kalman Filter (State Space Model)
     Dynamically tracks hedge ratio and spread mean
@@ -165,10 +168,10 @@ def get_kalman_filter_signals(S1, S2, window=60, z_entry=2.0, z_exit=0.0):
     state_cov = np.zeros((n, 2, 2))
     
     state_mean[0] = [0, S2.iloc[0]/S1.iloc[0] if S1.iloc[0]!=0 else 1]
-    state_cov[0] = np.eye(2) * 1.0
+    state_cov[0] = np.eye(2) * kf_p0
     
-    V_w = np.eye(2) * 1e-4  # State covariance
-    V_v = 1e-3              # Observation covariance
+    V_w = np.eye(2) * kf_q  # State covariance (Process Noise)
+    V_v = kf_r              # Observation covariance (Measurement Noise)
     
     predictions = np.zeros(n)
     variances = np.zeros(n)
@@ -213,7 +216,7 @@ def get_kalman_filter_signals(S1, S2, window=60, z_entry=2.0, z_exit=0.0):
     })
     return df.dropna()
 
-def get_copula_signals(S1, S2, window, prob_threshold=0.95):
+def get_copula_signals(S1, S2, window, prob_threshold=0.95, copula_clip_bounds=0.001):
     """
     Copula based Cumulative Mispricing Index (CMPI)
     """
@@ -236,9 +239,9 @@ def get_copula_signals(S1, S2, window, prob_threshold=0.95):
         u1 = returns_S1.iloc[i-window:i]
         u2 = returns_S2.iloc[i-window:i]
         
-        # 修正 Infinity Bug：將百分位數限制在 0.001 ~ 0.999 之間
-        rank1 = np.clip(u1.rank(pct=True).iloc[-1], 0.001, 0.999)
-        rank2 = np.clip(u2.rank(pct=True).iloc[-1], 0.001, 0.999)
+        # 修正 Infinity Bug：將百分位數限制在極端值之間
+        rank1 = np.clip(u1.rank(pct=True).iloc[-1], copula_clip_bounds, 1.0 - copula_clip_bounds)
+        rank2 = np.clip(u2.rank(pct=True).iloc[-1], copula_clip_bounds, 1.0 - copula_clip_bounds)
         
         rho = u1.corr(u2)
         
@@ -416,10 +419,10 @@ def get_np_cusum_signals(S1, S2, window, k_shift=1.0, tau_threshold=5.0, z_exit=
     })
     return df.dropna()
 
-def get_gsadf_signals(S1, S2, window, adf_threshold=1.5, z_exit=0.0):
+def get_gsadf_signals(S1, S2, window, adf_threshold=1.5, z_exit=0.0, min_window_pct=0.2):
     """
-    PSY GSADF (Generalized Sup ADF) 檢定逼近法。
-    在滾動窗口內計算多個起點的 ADF 檢定，找出最大的 t-statistic (爆發根)。
+    PSY GSADF (Generalized Sup ADF) 檢定發散泡沫。
+    由於計算量極大，此處實作 SADF，並限定 min_length。
     """
     X = sm.add_constant(S1)
     model = sm.OLS(S2, X).fit()
@@ -435,8 +438,8 @@ def get_gsadf_signals(S1, S2, window, adf_threshold=1.5, z_exit=0.0):
     warnings.filterwarnings("ignore")
     
     # To save computation, instead of full GSADF O(N^2), 
-    # we compute SADF on the last `window` data points with min_length = window/2
-    min_len = max(int(window / 2), 15)
+    # we compute SADF on the last `window` data points with min_length
+    min_len = max(int(window * min_window_pct), 15)
     
     for i in range(window, len(spread)):
         current_spread = spread.iloc[i-window:i].dropna()
@@ -473,7 +476,7 @@ def get_gsadf_signals(S1, S2, window, adf_threshold=1.5, z_exit=0.0):
     })
     return df.dropna()
 
-def get_dcc_garch_vecm_signals(S1, S2, window, t_threshold=3.0, z_exit=0.0):
+def get_dcc_garch_vecm_signals(S1, S2, window, t_threshold=3.0, z_exit=0.0, dcc_span_vol=None, dcc_span_drift=None):
     """
     DCC-GARCH-VECM 特異性漂移爆發檢定 (Idiosyncratic Drift-Burst)。
     剔除 Beta 噪音，使用 GARCH 估計條件波動率，針對殘差局部漂移進行 t-檢定。
@@ -490,12 +493,12 @@ def get_dcc_garch_vecm_signals(S1, S2, window, t_threshold=3.0, z_exit=0.0):
     residuals = residuals.fillna(0)
     
     # 2. GARCH 條件異方差估計 (使用 EMA 近似 GARCH(1,1) 的動態波動率以追求即時性與穩定性)
-    span_vol = int(window / 2)
+    span_vol = dcc_span_vol if dcc_span_vol else max(int(window / 2), 3)
     conditional_var = (residuals ** 2).ewm(span=span_vol).mean()
     conditional_vol = np.sqrt(conditional_var)
     
     # 3. 殘差漂移項 (Local Drift of Residuals)
-    span_drift = max(int(window / 5), 3)
+    span_drift = dcc_span_drift if dcc_span_drift else max(int(window / 5), 3)
     local_drift = residuals.ewm(span=span_drift).mean()
     
     # 4. Drift-Burst t-statistic
@@ -513,7 +516,7 @@ def get_dcc_garch_vecm_signals(S1, S2, window, t_threshold=3.0, z_exit=0.0):
     })
     return df.dropna()
 
-def get_markov_regime_signals(S1, S2, window, prob_threshold=0.8, z_exit=0.5):
+def get_markov_regime_signals(S1, S2, window, prob_threshold=0.8, z_exit=0.5, switching_variance=True):
     """
     Markov Regime-Switching (MRS) Model.
     Fits a 2-regime model on rolling windows.
@@ -538,7 +541,7 @@ def get_markov_regime_signals(S1, S2, window, prob_threshold=0.8, z_exit=0.5):
         current_spread = spread.iloc[i-window:i].dropna()
         if len(current_spread) > 30:
             try:
-                mod = sm_api.tsa.MarkovRegression(current_spread, k_regimes=2, trend='c', switching_variance=True)
+                mod = sm_api.tsa.MarkovRegression(current_spread, k_regimes=2, trend='c', switching_variance=switching_variance)
                 res = mod.fit(disp=False, search_reps=3, maxiter=20)
                 var_0 = res.params.get('sigma2[0]', 1)
                 var_1 = res.params.get('sigma2[1]', 1)

@@ -1,0 +1,21 @@
+﻿配對組合,模型,獲利因子,夏普比率,總報酬率(%),最大回撤(%),交易次數
+美元日圓 vs 紐幣美元 (USDJPY=X vs NZDUSD=X),Z-Score,1.78,-1.86,0.18,1.54,12
+美元日圓 vs 紐幣美元 (USDJPY=X vs NZDUSD=X),卡爾曼濾波,0.0,-13.75,-0.57,0.57,2
+歐元美元 vs 美元日圓 (EURUSD=X vs USDJPY=X),Z-Score,0.0,-23.69,-0.35,0.29,2
+美元日圓 vs 澳幣美元 (USDJPY=X vs AUDUSD=X),卡爾曼濾波,0.0,-23.86,-0.12,0.12,2
+美元日圓 vs 澳幣美元 (USDJPY=X vs AUDUSD=X),Z-Score,1.46,-33.07,-0.03,0.11,2
+澳幣美元 vs 紐幣美元 (AUDUSD=X vs NZDUSD=X),Z-Score,0.0,-82.62,-0.39,0.39,32
+英鎊美元 vs 紐幣美元 (GBPUSD=X vs NZDUSD=X),Z-Score,0.0,-88.82,-0.18,0.17,9
+歐元美元 vs 英鎊美元 (EURUSD=X vs GBPUSD=X),卡爾曼濾波,0.0,-94.85,-0.07,0.07,1
+歐元美元 vs 美元日圓 (EURUSD=X vs USDJPY=X),卡爾曼濾波,0.0,-95.53,-0.11,0.05,1
+歐元美元 vs 紐幣美元 (EURUSD=X vs NZDUSD=X),卡爾曼濾波,0.0,-102.06,-0.05,0.05,1
+歐元美元 vs 紐幣美元 (EURUSD=X vs NZDUSD=X),Z-Score,0.0,-102.09,-0.05,0.05,1
+歐元美元 vs 英鎊美元 (EURUSD=X vs GBPUSD=X),Z-Score,0.0,-127.29,-0.07,0.04,1
+歐元美元 vs 澳幣美元 (EURUSD=X vs AUDUSD=X),卡爾曼濾波,0.0,-136.39,-0.06,0.05,2
+歐元美元 vs 澳幣美元 (EURUSD=X vs AUDUSD=X),Z-Score,0.0,-136.39,-0.06,0.05,2
+澳幣美元 vs 紐幣美元 (AUDUSD=X vs NZDUSD=X),卡爾曼濾波,0.0,-140.51,-0.1,0.1,8
+英鎊美元 vs 紐幣美元 (GBPUSD=X vs NZDUSD=X),卡爾曼濾波,0.0,-263.36,-0.02,0.02,1
+英鎊美元 vs 澳幣美元 (GBPUSD=X vs AUDUSD=X),卡爾曼濾波,0.0,-487.99,-0.02,0.01,1
+英鎊美元 vs 澳幣美元 (GBPUSD=X vs AUDUSD=X),Z-Score,0.0,-487.99,-0.02,0.01,1
+美元日圓 vs 英鎊美元 (USDJPY=X vs GBPUSD=X),Z-Score,0.0,-515.26,-0.04,0.01,1
+美元日圓 vs 英鎊美元 (USDJPY=X vs GBPUSD=X),卡爾曼濾波,0.0,-515.26,-0.04,0.01,1

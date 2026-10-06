@@ -1,0 +1,458 @@
+"""
+Japan Top 2 Listed Companies by Sub-Industry
+============================================
+根據最新細產業分類與 EDINET 有価証券報告書 (セグメント情報)，
+精準提取各細產業在日本東京證券交易所 (TSE/JPX) 市值前 2 大上市公司名單，
+包含代號、細產業、主要產品、營收占比與最新市值/現價。
+"""
+
+import sys
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
+import json
+import pandas as pd
+import yfinance as yf
+
+# 定義 14 大核心細產業之日股前 2 大龍頭與 EDINET 產品營收結構
+JAPAN_SUBINDUSTRY_DATA = [
+    # 1. 電信服務 (Telecommunications Services) - [PF > 3.0]
+    {
+        "SubIndustry": "電信服務",
+        "Rank": 1,
+        "Ticker": "9432.T",
+        "Name": "日本電信電話 (NTT)",
+        "JP_Name": "日本電信電話株式会社",
+        "EN_Name": "Nippon Telegraph and Telephone Corporation",
+        "PrimaryProduct": "綜合資通訊與固網寬頻服務 (NTT東日本/西日本)",
+        "PrimaryRatio": 35.0,
+        "ProductBreakdown": "地域通訊與固網寬頻 35.0% | 全球IT系統方案 (NTT DATA) 35.0% | 5G行動通訊 (NTT DOCOMO) 30.0%",
+        "BusinessSummary": "日本第一大綜合電信巨頭，旗下控股 NTT DOCOMO 與 NTT DATA，壟斷全日本光纖固網與行動通訊市場。",
+        "TaiwanPeers": "2412.TW (中華電), 3045.TW (台灣大), 4904.TW (遠傳)"
+    },
+    {
+        "SubIndustry": "電信服務",
+        "Rank": 2,
+        "Ticker": "9433.T",
+        "Name": "KDDI",
+        "JP_Name": "KDDI株式会社",
+        "EN_Name": "KDDI Corporation",
+        "PrimaryProduct": "au 行動通訊與個人生活服務 (Personal Services)",
+        "PrimaryRatio": 80.0,
+        "ProductBreakdown": "個人行動通訊與家庭寬頻 (au) 80.0% | 企業雲端與IoT解決方案 20.0%",
+        "BusinessSummary": "日本第二大綜合電信服務商，以 au 品牌提供 5G 行動電話、光纖寬頻與金融科技生活生態圈。",
+        "TaiwanPeers": "3045.TW (台灣大), 4904.TW (遠傳)"
+    },
+
+    # 2. 半導體封裝測試 (Semiconductor Assembly & Test) - [PF > 3.0]
+    {
+        "SubIndustry": "半導體封裝測試",
+        "Rank": 1,
+        "Ticker": "6857.T",
+        "Name": "愛德萬測試 (Advantest)",
+        "JP_Name": "株式会社アドバンテスト",
+        "EN_Name": "Advantest Corporation",
+        "PrimaryProduct": "半導體與組件測試系統 (Semiconductor & Component Test Systems)",
+        "PrimaryRatio": 71.0,
+        "ProductBreakdown": "SoC 與記憶體自動化測試設備 (ATE) 71.0% | 機電整合測試分類機與服務 29.0%",
+        "BusinessSummary": "全球半導體測試機台龍頭，在 AI/HPC 晶片 (Nvidia GPU / AMD CPU) 測試市占率超 55%，晶圓測試不可或缺。",
+        "TaiwanPeers": "3711.TW (日月光投控), 3264.TWO (欣銓), 6257.TW (矽格), 6223.TWO (旺矽)"
+    },
+    {
+        "SubIndustry": "半導體封裝測試",
+        "Rank": 2,
+        "Ticker": "6146.T",
+        "Name": "迪思科 (DISCO)",
+        "JP_Name": "株式会社ディスコ",
+        "EN_Name": "DISCO Corporation",
+        "PrimaryProduct": "晶圓精密切割與研磨裝置 (Precision Processing Equipment)",
+        "PrimaryRatio": 55.0,
+        "ProductBreakdown": "切割研磨加工裝置 55.0% | 消耗性精密鑽石切割輪與刀具 25.0% | 保養維修服務 20.0%",
+        "BusinessSummary": "全球半導體後段切割機 (Dicer) 與研磨機 (Grinder) 絕對壟斷霸主，市占率超 70%，先進封裝 CoWoS 必備工具。",
+        "TaiwanPeers": "3711.TW (日月光投控), 6271.TW (同欣電), 2441.TW (超豐)"
+    },
+
+    # 3. 矽晶圓與半導體材料 (Silicon Wafers & Materials) - [PF > 3.0]
+    {
+        "SubIndustry": "矽晶圓與半導體材料",
+        "Rank": 1,
+        "Ticker": "4063.T",
+        "Name": "信越化學 (Shin-Etsu Chemical)",
+        "JP_Name": "信越化学工業株式会社",
+        "EN_Name": "Shin-Etsu Chemical Co., Ltd.",
+        "PrimaryProduct": "高純度半導體矽晶圓 (Semiconductor Silicon Wafers)",
+        "PrimaryRatio": 42.0,
+        "ProductBreakdown": "半導體單晶矽晶圓 42.0% | 基礎化學品 (PVC/苛性鈉) 32.0% | 電子功能材料 (光阻/石英) 17.0% | 矽利光 9.0%",
+        "BusinessSummary": "全球第一大半導體矽晶圓製造商（全球市占逾 30%），兼具高階 EUV 光阻劑、光罩合成石英與有機矽全球領先地位。",
+        "TaiwanPeers": "6488.TWO (環球晶), 5483.TWO (中美晶), 3532.TW (台勝科)"
+    },
+    {
+        "SubIndustry": "矽晶圓與半導體材料",
+        "Rank": 2,
+        "Ticker": "3436.T",
+        "Name": "勝高 (SUMCO)",
+        "JP_Name": "株式会社SUMCO",
+        "EN_Name": "SUMCO Corporation",
+        "PrimaryProduct": "高純度單晶半導體矽晶圓 (Polished & Epitaxial Silicon Wafers)",
+        "PrimaryRatio": 100.0,
+        "ProductBreakdown": "12吋 (300mm) 與 8吋 (200mm) 磊晶矽晶圓 100.0%",
+        "BusinessSummary": "全球第二大半導體矽晶圓製造商（全球市占約 25%），由住友金屬與三菱材料合資，台勝科 (3532) 為其在台合資子公司。",
+        "TaiwanPeers": "3532.TW (台勝科), 6488.TWO (環球晶), 5483.TWO (中美晶)"
+    },
+
+    # 4. ABF載板與高階PCB (IC Substrates & PCB) - [PF > 3.0]
+    {
+        "SubIndustry": "ABF載板與高階PCB",
+        "Rank": 1,
+        "Ticker": "4062.T",
+        "Name": "揖斐電 (Ibiden)",
+        "JP_Name": "イビデン株式会社",
+        "EN_Name": "Ibiden Co., Ltd.",
+        "PrimaryProduct": "高階 FC-BGA / ABF 覆晶封裝載板 (IC Packaging Substrates)",
+        "PrimaryRatio": 57.0,
+        "ProductBreakdown": "電子事業 (FC-BGA/ABF載板) 57.0% | 陶瓷事業 (DPF/SiC) 30.0% | 其他事業 13.0%",
+        "BusinessSummary": "全球第一大 ABF 覆晶載板供應商，Intel、AMD 與 Nvidia 伺服器 CPU/GPU 核心載板技術引領者。",
+        "TaiwanPeers": "3037.TW (欣興), 3189.TW (景碩), 8046.TW (南電), 2368.TW (金像電)"
+    },
+    {
+        "SubIndustry": "ABF載板與高階PCB",
+        "Rank": 2,
+        "Ticker": "6787.T",
+        "Name": "名幸電子 (Meiko Electronics)",
+        "JP_Name": "株式会社メイコー",
+        "EN_Name": "Meiko Electronics Co., Ltd.",
+        "PrimaryProduct": "高密度互連 (HDI) 與高階車用/伺服器多層印刷電路板",
+        "PrimaryRatio": 95.0,
+        "ProductBreakdown": "高階車載印刷電路板 45.0% | 通訊與伺服器高多層板 30.0% | 智慧型手機任意層 (Any-Layer HDI) 20.0% | 其他 5.0%",
+        "BusinessSummary": "日本最大的高階 HDI 與車用印刷電路板龍頭（原新光電氣 6967 被 JIC 私有化後之日股 PCB 代表），在 AI 伺服器高多層板與車用電子覆蓋極廣。",
+        "TaiwanPeers": "2368.TW (金像電), 3037.TW (欣興), 3044.TW (健鼎), 6269.TW (台郡)"
+    },
+
+    # 5. 記憶體晶片與模組 (Memory IC & Storage) - [PF > 3.0]
+    {
+        "SubIndustry": "記憶體晶片與模組",
+        "Rank": 1,
+        "Ticker": "285A.T",
+        "Name": "鎧俠 (Kioxia Holdings)",
+        "JP_Name": "キオクシアホールディングス株式会社",
+        "EN_Name": "Kioxia Holdings Corporation",
+        "PrimaryProduct": "NAND 快閃記憶體與 SSD 固態硬碟 (NAND Flash & SSD)",
+        "PrimaryRatio": 95.0,
+        "ProductBreakdown": "快閃記憶體與儲存裝置 (BiCS FLASH™) 95.0% | 其他儲存周邊 5.0%",
+        "BusinessSummary": "日本最大、全球前三大 NAND Flash 快閃記憶體製造廠（原東芝記憶體 Toshiba Memory），與美商威騰 (WD) 合作晶圓廠。",
+        "TaiwanPeers": "3260.TWO (威剛), 3006.TW (晶豪科), 8299.TWO (群聯), 2344.TW (華邦電)"
+    },
+    {
+        "SubIndustry": "記憶體晶片與模組",
+        "Rank": 2,
+        "Ticker": "6963.T",
+        "Name": "羅姆半導體 (ROHM)",
+        "JP_Name": "ローム株式会社",
+        "EN_Name": "ROHM Co., Ltd.",
+        "PrimaryProduct": "儲存控制 LSI 與類比電源 IC (Memory Controller & Power LSI)",
+        "PrimaryRatio": 45.0,
+        "ProductBreakdown": "積體電路 LSI 45.0% | 半導體元件 (電晶體/二極體/SiC) 40.0% | 模組與光學 15.0%",
+        "BusinessSummary": "日本車用與記憶體週邊控制 IC 大廠，積極布局第三代半導體 SiC (碳化矽) 與記憶體電源控制元件。",
+        "TaiwanPeers": "3006.TW (晶豪科), 3260.TWO (威剛), 2408.TW (南亞科)"
+    },
+
+    # 6. AI伺服器與ODM代工 (AI Servers & IT Systems) - [PF > 3.0]
+    {
+        "SubIndustry": "AI伺服器與ODM代工",
+        "Rank": 1,
+        "Ticker": "6501.T",
+        "Name": "日立製作所 (Hitachi)",
+        "JP_Name": "株式会社日立製作所",
+        "EN_Name": "Hitachi, Ltd.",
+        "PrimaryProduct": "數位系統與伺服器解決方案 (Digital Systems & Services / Lumada)",
+        "PrimaryRatio": 27.0,
+        "ProductBreakdown": "數位系統與雲端IT (Hitachi Vantara) 27.0% | 綠色能源與電網 32.0% | 連接產業與智慧製造 35.0% | 其他 6.0%",
+        "BusinessSummary": "日本最大的綜合電機與 IT 解決方案跨國巨頭，旗下 Hitachi Vantara 提供企業級高效能儲存與 AI 伺服器架構。",
+        "TaiwanPeers": "2382.TW (廣達), 2317.TW (鴻海), 6669.TW (緯穎), 2356.TW (英業達)"
+    },
+    {
+        "SubIndustry": "AI伺服器與ODM代工",
+        "Rank": 2,
+        "Ticker": "6702.T",
+        "Name": "富士通 (Fujitsu)",
+        "JP_Name": "富士通株式会社",
+        "EN_Name": "Fujitsu Limited",
+        "PrimaryProduct": "企業 IT 服務與伺服器系統 (Service & Hardware Solutions)",
+        "PrimaryRatio": 68.0,
+        "ProductBreakdown": "服務解決方案 (雲端/SI) 68.0% | 硬體解決方案 (PRIMERGY 伺服器/儲存) 25.0% | 個人電腦與終端 7.0%",
+        "BusinessSummary": "日本最大的伺服器與超級電腦製造商（打造日本富岳 Fugaku 超算與 PRIMERGY 企業 AI 伺服器）。",
+        "TaiwanPeers": "2353.TW (宏碁), 2356.TW (英業達), 2324.TW (仁寶), 3231.TW (緯創)"
+    },
+
+    # 7. 銅箔基板與PCB核心材料 (CCL & Glass Cloth)
+    {
+        "SubIndustry": "銅箔基板 (CCL)",
+        "Rank": 1,
+        "Ticker": "6752.T",
+        "Name": "松下 (Panasonic Holdings)",
+        "JP_Name": "パナソニック ホールディングス株式会社",
+        "EN_Name": "Panasonic Holdings Corporation",
+        "PrimaryProduct": "Megtron 系列超低損耗高頻高速銅箔基板 (Low Loss CCL)",
+        "PrimaryRatio": 15.0,
+        "ProductBreakdown": "產業材料元件 (含 Megtron 6/7/8 CCL) 15.0% | 生活能源與車用電池 20.0% | 汽車座艙 18.0% | 電氣家電 40.0% | 聯網方案 7.0%",
+        "BusinessSummary": "旗下 Panasonic Industry 為全球 AI 伺服器、5G 通訊頂級超低損耗 CCL 規格制定者與領導者。",
+        "TaiwanPeers": "2383.TW (台光電), 6274.TWO (台燿), 6213.TW (聯茂)"
+    },
+    {
+        "SubIndustry": "銅箔基板 (CCL)",
+        "Rank": 2,
+        "Ticker": "3110.T",
+        "Name": "日東紡績 (Nittobo)",
+        "JP_Name": "日東紡績株式会社",
+        "EN_Name": "Nittobo Co., Ltd.",
+        "PrimaryProduct": "極低介電 (Low-Dk / Low-CTE) 高階玻璃纖維布 (Glass Cloth for CCL)",
+        "PrimaryRatio": 42.0,
+        "ProductBreakdown": "電子材料玻纖布 (Low-Dk 布) 42.0% | 玻璃纖維工業製品 30.0% | 複合材料與化學 28.0%",
+        "BusinessSummary": "全球高階 AI 伺服器銅箔基板 (CCL) 所需之 Low-Dk 玻璃纖維紗布壟斷龍頭，市占率高達 80% 以上。",
+        "TaiwanPeers": "1815.TW (富喬), 2383.TW (台光電), 6274.TWO (台燿)"
+    },
+
+    # 8. 半導體前段製造設備 (Front-End Semiconductor Equipment)
+    {
+        "SubIndustry": "半導體設備",
+        "Rank": 1,
+        "Ticker": "8035.T",
+        "Name": "東京威力科創 (Tokyo Electron)",
+        "JP_Name": "東京エレクトロン株式会社",
+        "EN_Name": "Tokyo Electron Limited (TEL)",
+        "PrimaryProduct": "半導體前段製造裝置 (Semiconductor Production Equipment)",
+        "PrimaryRatio": 98.0,
+        "ProductBreakdown": "半導體製造裝置 (塗布顯影機/蝕刻機/熱處理) 98.0% | 平面顯示器製造裝置 2.0%",
+        "BusinessSummary": "全球前三大、日本最大半導體設備商，極紫外光 (EUV) 塗布顯影機 (Coater/Developer) 全球市占達 88%。",
+        "TaiwanPeers": "3131.TWO (弘塑), 3583.TW (辛耘), 3680.TWO (家登)"
+    },
+    {
+        "SubIndustry": "半導體設備",
+        "Rank": 2,
+        "Ticker": "7735.T",
+        "Name": "斯克林 (SCREEN Holdings)",
+        "JP_Name": "株式会社SCREENホールディングス",
+        "EN_Name": "SCREEN Holdings Co., Ltd.",
+        "PrimaryProduct": "晶圓化學清洗設備 (Wafer Cleaning Equipment)",
+        "PrimaryRatio": 83.0,
+        "ProductBreakdown": "半導體製造裝置 (單晶圓與批次清洗機) 83.0% | 印刷繪圖設備 10.0% | 顯示器製造裝置 7.0%",
+        "BusinessSummary": "全球半導體單晶圓與批式濕式清洗機絕對霸主，全球市占率超 45%，先進製程晶圓清洗必備。",
+        "TaiwanPeers": "3583.TW (辛耘), 3131.TWO (弘塑), 6187.TWO (萬潤)"
+    },
+
+    # 9. 被動元件與車用MLCC (Passive Components & MLCC)
+    {
+        "SubIndustry": "被動元件",
+        "Rank": 1,
+        "Ticker": "6981.T",
+        "Name": "村田製作所 (Murata)",
+        "JP_Name": "株式会社村田製作所",
+        "EN_Name": "Murata Manufacturing Co., Ltd.",
+        "PrimaryProduct": "積層陶瓷電容器 (Multilayer Ceramic Capacitors / MLCC)",
+        "PrimaryRatio": 45.0,
+        "ProductBreakdown": "電容器 (MLCC) 45.0% | 高頻通訊模組 28.0% | 電感器與感測器 18.0% | 功能模組 9.0%",
+        "BusinessSummary": "全球第一大被動元件製造商，全球 MLCC 綜合市占約 40%，車規級與高階智慧型手機 MLCC 領頭羊。",
+        "TaiwanPeers": "2327.TW (國巨), 2492.TW (華新科), 6173.TWO (信昌電)"
+    },
+    {
+        "SubIndustry": "被動元件",
+        "Rank": 2,
+        "Ticker": "6762.T",
+        "Name": "TDK",
+        "JP_Name": "TDK株式会社",
+        "EN_Name": "TDK Corporation",
+        "PrimaryProduct": "能源二次電池與被動元件 (Energy Devices & Passive Components)",
+        "PrimaryRatio": 52.0,
+        "ProductBreakdown": "能源應用製品 (ATL二次電池) 52.0% | 被動元件 (陶瓷電容/電感/鐵氧體) 28.0% | 磁性應用 11.0% | 感測器 9.0%",
+        "BusinessSummary": "全球電子零組件巨頭，在電感、磁珠材料與智慧型手機鋰電池 (ATL) 領域位居全球前列。",
+        "TaiwanPeers": "2327.TW (國巨), 2456.TW (奇力新/國巨), 3042.TW (晶技)"
+    },
+
+    # 10. 散熱技術與精密機電 (Thermal Solutions & Motors)
+    {
+        "SubIndustry": "散熱與機殼模組",
+        "Rank": 1,
+        "Ticker": "6594.T",
+        "Name": "尼得科 (Nidec)",
+        "JP_Name": "ニデック株式会社 (旧日本電産)",
+        "EN_Name": "Nidec Corporation",
+        "PrimaryProduct": "精密伺服器風扇與水冷冷卻分配單元 (CDU / Cooling Systems)",
+        "PrimaryRatio": 25.0,
+        "ProductBreakdown": "精密小型小型馬達與散熱模組 25.0% | 車載事業 (牽引電機) 26.0% | 家電與工業機電 35.0% | 機器設備 14.0%",
+        "BusinessSummary": "全球無刷精密馬達龍頭，獲 Supermicro / AI 伺服器水冷 CDU (Cooling Distribution Unit) 與水冷板巨量訂單。",
+        "TaiwanPeers": "3017.TW (奇鋐), 3324.TWO (雙鴻), 2421.TW (建準), 3653.TW (健策)"
+    },
+    {
+        "SubIndustry": "散熱與機殼模組",
+        "Rank": 2,
+        "Ticker": "6479.T",
+        "Name": "美蓓亞三美 (MinebeaMitsumi)",
+        "JP_Name": "ミネベアミツミ株式会社",
+        "EN_Name": "MinebeaMitsumi Inc.",
+        "PrimaryProduct": "微型滾珠軸承與伺服器冷卻風扇 (Miniature Bearings & Cooling Fans)",
+        "PrimaryRatio": 35.0,
+        "ProductBreakdown": "精密機械組件 (微型滾珠軸承) 35.0% | 半導體與電子元件 (三美) 40.0% | 汽車與光學部件 25.0%",
+        "BusinessSummary": "全球外徑 22mm 以下微型軸承市占超 60%，高效能伺服器散熱風扇與電機精密元件龍頭。",
+        "TaiwanPeers": "2421.TW (建準), 3017.TW (奇鋐), 1582.TW (辛耘)"
+    },
+
+    # 11. 貨櫃航運與散裝物流 (Marine Shipping & Logistics)
+    {
+        "SubIndustry": "航運與海運物流",
+        "Rank": 1,
+        "Ticker": "9101.T",
+        "Name": "日本郵船 (NYK Line)",
+        "JP_Name": "日本郵船株式会社",
+        "EN_Name": "Nippon Yusen Kabushiki Kaisha",
+        "PrimaryProduct": "不定期散裝/專用船與定期貨櫃船 (Bulk Shipping & Liner / ONE)",
+        "PrimaryRatio": 45.0,
+        "ProductBreakdown": "不定期專用船 (汽車船/LNG/散裝) 45.0% | 定期貨櫃船 (ONE 合資利益) 30.0% | 郵船航空海運物流 22.0% | 其他 3.0%",
+        "BusinessSummary": "日本第一大海運集團，與商船三井、川崎汽船合資成立全球領先貨櫃航運聯盟巨頭 ONE (Ocean Network Express)。",
+        "TaiwanPeers": "2603.TW (長榮), 2609.TW (陽明), 2615.TW (萬海), 2605.TW (新興)"
+    },
+    {
+        "SubIndustry": "航運與海運物流",
+        "Rank": 2,
+        "Ticker": "9104.T",
+        "Name": "商船三井 (MOL)",
+        "JP_Name": "株式会社商船三井",
+        "EN_Name": "Mitsui O.S.K. Lines, Ltd.",
+        "PrimaryProduct": "能源專用船與定期貨櫃船 (Energy Transport & Liner / ONE)",
+        "PrimaryRatio": 35.0,
+        "ProductBreakdown": "能源與專用船 (LNG/油輪/汽車船) 35.0% | 定期貨櫃船 (ONE) 28.0% | 乾散裝船 25.0% | 海洋事業與物流 12.0%",
+        "BusinessSummary": "日本第二大海運巨頭，在全球 LNG 運輸船與汽車專用運輸船領域市占處於全球頂尖梯隊。",
+        "TaiwanPeers": "2603.TW (長榮), 2609.TW (陽明), 2606.TW (裕民)"
+    },
+
+    # 12. 汽車與電動車製造 (Automotive & EV)
+    {
+        "SubIndustry": "汽車與整車製造",
+        "Rank": 1,
+        "Ticker": "7203.T",
+        "Name": "豐田汽車 (Toyota Motor)",
+        "JP_Name": "トヨタ自動車株式会社",
+        "EN_Name": "Toyota Motor Corporation",
+        "PrimaryProduct": "四輪整車與汽車零組件製造銷售 (Automotive Sales)",
+        "PrimaryRatio": 90.0,
+        "ProductBreakdown": "汽車製造銷售 (Toyota / Lexus) 90.0% | 金融服務 (汽車租賃分期) 8.0% | 其他 2.0%",
+        "BusinessSummary": "全球新車銷量冠軍，日本市值最高之超級跨國巨頭，引領油電混合 (HEV)、純電 (BEV) 與氫能源車載發展。",
+        "TaiwanPeers": "2207.TW (和泰車), 2201.TW (裕隆), 2204.TW (中華)"
+    },
+    {
+        "SubIndustry": "汽車與整車製造",
+        "Rank": 2,
+        "Ticker": "7267.T",
+        "Name": "本田技研 (Honda Motor)",
+        "JP_Name": "本田技研工業株式会社",
+        "EN_Name": "Honda Motor Co., Ltd.",
+        "PrimaryProduct": "四輪乘用車與二輪摩托車 (Automobiles & Motorcycles)",
+        "PrimaryRatio": 65.0,
+        "ProductBreakdown": "四輪汽車事業 65.0% | 二輪摩托車事業 15.0% | 金融服務事業 16.0% | 動力產品與其他 4.0%",
+        "BusinessSummary": "全球摩托車第一大廠，也是全球主要乘用車與通用動力機械製造商，加速推進車用電氣化。",
+        "TaiwanPeers": "2207.TW (和泰車), 2201.TW (裕隆), 1319.TW (東陽)"
+    },
+
+    # 13. 金融銀行與大型金控 (Banking & Megabanks)
+    {
+        "SubIndustry": "金控-銀行型",
+        "Rank": 1,
+        "Ticker": "8306.T",
+        "Name": "三菱日聯金融集團 (MUFG)",
+        "JP_Name": "株式会社三菱UFJフィナンシャル・グループ",
+        "EN_Name": "Mitsubishi UFJ Financial Group, Inc.",
+        "PrimaryProduct": "企業法人金融與國際商業銀行業務 (Corporate & Global Banking)",
+        "PrimaryRatio": 35.0,
+        "ProductBreakdown": "法人企業與投資銀行 35.0% | 國際商業銀行 (含持股摩根士丹利) 30.0% | 個人零售金融 25.0% | 資產管理與信託 10.0%",
+        "BusinessSummary": "日本最大的綜合金融控股集團（三大メガバンク之首），總資產規模全球前十大。",
+        "TaiwanPeers": "2881.TW (富邦金), 2882.TW (國泰金), 2891.TW (中信金), 2886.TW (兆豐金)"
+    },
+    {
+        "SubIndustry": "金控-銀行型",
+        "Rank": 2,
+        "Ticker": "8316.T",
+        "Name": "三井住友金融集團 (SMFG)",
+        "JP_Name": "株式会社三井住友フィナンシャルグループ",
+        "EN_Name": "Sumitomo Mitsui Financial Group, Inc.",
+        "PrimaryProduct": "大型法人批發金融與零售銀行 (Wholesale & Retail Banking)",
+        "PrimaryRatio": 38.0,
+        "ProductBreakdown": "批發企業金融 (Wholesale) 38.0% | 全球國際金融 (Global) 28.0% | 個人零售業務 (Retail) 22.0% | 市場運作 12.0%",
+        "BusinessSummary": "日本第二大綜合金融集團，核心為三井住友銀行 (SMBC)，海外併購與亞洲市場投資布局積極。",
+        "TaiwanPeers": "2881.TW (富邦金), 2882.TW (國泰金), 2891.TW (中信金), 2884.TW (玉山金)"
+    },
+
+    # 14. 光學鏡頭與影像模組 (Optical Sensors & Lens)
+    {
+        "SubIndustry": "光學鏡頭與元件",
+        "Rank": 1,
+        "Ticker": "6758.T",
+        "Name": "索尼集團 (Sony Group)",
+        "JP_Name": "ソニーグループ株式会社",
+        "EN_Name": "Sony Group Corporation",
+        "PrimaryProduct": "CMOS 影像感測器 (Imaging & Sensing Solutions / CIS)",
+        "PrimaryRatio": 15.0,
+        "ProductBreakdown": "遊戲與網絡服務 (PS5) 32.0% | 音樂娛樂 16.0% | 影像感測器 (CIS) 15.0% | 娛樂技術與相機 15.0% | 金融服務 14.0% | 電影 8.0%",
+        "BusinessSummary": "全球 CMOS 影像感測器 (CIS) 絕對霸主（全球市占率超 52%），Apple iPhone 與旗艦手機感測器主要供應商。",
+        "TaiwanPeers": "3008.TW (大立光), 3406.TW (玉晶光), 6271.TW (同欣電)"
+    },
+    {
+        "SubIndustry": "光學鏡頭與元件",
+        "Rank": 2,
+        "Ticker": "7751.T",
+        "Name": "佳能 (Canon)",
+        "JP_Name": "キヤノン株式会社",
+        "EN_Name": "Canon Inc.",
+        "PrimaryProduct": "辦公室事務機與半導體奈米壓印曝光機 (Printing & Semiconductor Equipment)",
+        "PrimaryRatio": 54.0,
+        "ProductBreakdown": "印刷事務機 (Printing) 54.0% | 影像相機光學系統 (Imaging) 19.0% | 醫療影像設備 (Medical) 13.0% | 半導體曝光機 (Industrial) 10.0% | 其他 4.0%",
+        "BusinessSummary": "全球光學影像與相機領導品牌，近年推出奈米壓印 (NIL) 半導體曝光機，挑戰 ASML 光刻機獨佔地位。",
+        "TaiwanPeers": "3008.TW (大立光), 2374.TW (佳能), 3406.TW (玉晶光)"
+    }
+]
+
+def main():
+    print(f"🚀 開始抓取日股 14 大細產業前 2 大上市公司最新市場數據 (共 {len(JAPAN_SUBINDUSTRY_DATA)} 檔)...")
+    tickers = [item['Ticker'] for item in JAPAN_SUBINDUSTRY_DATA]
+    
+    # 批次取得 yfinance 最新報價
+    try:
+        yf_tickers = yf.Tickers(' '.join(tickers))
+    except Exception as e:
+        print(f"⚠️ yfinance 批次連線提示: {e}")
+        yf_tickers = None
+
+    enriched_records = []
+    for item in JAPAN_SUBINDUSTRY_DATA:
+        rec = dict(item)
+        t = item['Ticker']
+        last_price = 0.0
+        mkt_cap = 0.0
+        currency = "JPY"
+
+        if yf_tickers and t in yf_tickers.tickers:
+            try:
+                fast = yf_tickers.tickers[t].fast_info
+                last_price = float(getattr(fast, 'last_price', 0.0) or 0.0)
+                mkt_cap = float(getattr(fast, 'market_cap', 0.0) or 0.0)
+                currency = getattr(fast, 'currency', 'JPY')
+            except Exception as ex:
+                pass
+
+        rec['CurrentPrice_JPY'] = round(last_price, 1)
+        rec['MarketCap_Trillion_JPY'] = round(mkt_cap / 1e12, 2)
+        enriched_records.append(rec)
+        print(f"  [{rec['SubIndustry']}] No.{rec['Rank']} {rec['Name']} ({t}) - 現價: ¥{rec['CurrentPrice_JPY']:,} | 市值: ¥{rec['MarketCap_Trillion_JPY']:.2f} 兆")
+
+    # 輸出 CSV
+    df = pd.DataFrame(enriched_records)
+    csv_file = 'japan_top2_by_subindustry.csv'
+    df.to_csv(csv_file, index=False, encoding='utf-8-sig')
+    print(f"\n💾 已成功將 28 檔日股細產業龍頭儲存為: {csv_file}")
+
+    # 輸出 JSON
+    json_file = 'japan_top2_by_subindustry.json'
+    with open(json_file, 'w', encoding='utf-8') as f:
+        json.dump(enriched_records, f, ensure_ascii=False, indent=2)
+    print(f"💾 已成功將結構化資料儲存為: {json_file}")
+
+if __name__ == '__main__':
+    main()
