@@ -27,3 +27,6 @@ temp_models.txt
 results/
 *.png
 *.bat
+
+data/
+*.db

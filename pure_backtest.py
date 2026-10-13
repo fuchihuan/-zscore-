@@ -303,6 +303,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     settlement_dates = get_third_wednesdays(start_year, end_year)
 
     valid_dates = zscore.index
+    date_to_idx = {d: i for i, d in enumerate(valid_dates)}
     slippage_ticks = advanced_params.get('slippage_ticks', 0.0)
     commission = advanced_params.get('commission', COMMISSION_PER_CONTRACT)
     enable_stop_loss = advanced_params.get('enable_stop_loss', True)
@@ -337,6 +338,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
             'entry_p2': 0.0,
             'entry_zscore': 0.0,
             'entry_date': None,
+            'cycle_start_date': None,
             'pending_reopen_dir': 0
         })
 
@@ -431,6 +433,8 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                     state['entry_p1'], state['entry_p2'] = p1, p2
                     state['entry_zscore'] = z
                     state['entry_date'] = date
+                    if not state.get('cycle_start_date'):
+                        state['cycle_start_date'] = date
                     cost = calc_leg_costs(p1, dyn_c1, p2, dyn_c2, is_settle=False)
                     cash -= cost
                     realized_pnl_total -= cost
@@ -506,12 +510,19 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                         if hit_sl:
                             state['is_stopped_out'] = True
                             stop_loss_count += 1
+                        cycle_start = state.get('cycle_start_date') or state.get('entry_date', date)
+                        c_days = date_to_idx.get(date, 0) - date_to_idx.get(cycle_start, 0) + 1
+                        if c_days <= 0:
+                            c_days = 1
                         trade_log.append({
                             '日期': date.strftime('%Y-%m-%d'),
+                            '進場日期': cycle_start.strftime('%Y-%m-%d') if hasattr(cycle_start, 'strftime') else str(cycle_start),
                             '動作': act_name,
-                            '損益': round(net_pnl, 0)
+                            '損益': round(net_pnl, 0),
+                            '持有天數': c_days
                         })
                         state['is_active'] = False
+                        state['cycle_start_date'] = None
 
         for state in grid_states:
             if state['is_stopped_out']:
@@ -552,6 +563,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                         state['entry_p1'], state['entry_p2'] = p1, p2
                         state['entry_zscore'] = z
                         state['entry_date'] = date
+                        state['cycle_start_date'] = date
                         cost = calc_leg_costs(p1, dyn_c1, p2, dyn_c2, is_settle=False)
                         cash -= cost
                         realized_pnl_total -= cost
@@ -571,6 +583,9 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         records.append({
             '日期': date,
             '帳戶淨值': equity,
+            '累計損益': equity - initial_capital,
+            '累計已實現損益': realized_pnl_total,
+            '未實現損益': unrealized_pnl,
             'Stop_Upper': rec_stop_upper,
             'Stop_Lower': rec_stop_lower
         })
@@ -610,6 +625,23 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         stats['avg_win'] = win['損益'].mean() if len(win) > 0 else 0
         stats['avg_lose'] = lose['損益'].mean() if len(lose) > 0 else 0
         stats['profit_factor'] = abs(win['損益'].sum() / lose['損益'].sum()) if lose['損益'].sum() != 0 else float('inf')
+
+        # 統計收斂天數 (持有天數 / 交易日)
+        if '持有天數' in df_trades.columns:
+            tp_trades = df_trades[df_trades['動作'] == '停利平倉']
+            conv_trades = tp_trades if not tp_trades.empty else df_trades[df_trades['持有天數'] > 0]
+            if not conv_trades.empty:
+                stats['avg_convergence_days'] = round(float(conv_trades['持有天數'].mean()), 1)
+                stats['min_convergence_days'] = int(conv_trades['持有天數'].min())
+                stats['max_convergence_days'] = int(conv_trades['持有天數'].max())
+            else:
+                stats['avg_convergence_days'] = 0.0
+                stats['min_convergence_days'] = 0
+                stats['max_convergence_days'] = 0
+        else:
+            stats['avg_convergence_days'] = 0.0
+            stats['min_convergence_days'] = 0
+            stats['max_convergence_days'] = 0
     else:
         stats['total_trades'] = 0
         stats['win_trades'] = 0
@@ -618,11 +650,17 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         stats['avg_win'] = 0
         stats['avg_lose'] = 0
         stats['profit_factor'] = 0
+        stats['avg_convergence_days'] = 0.0
+        stats['min_convergence_days'] = 0
+        stats['max_convergence_days'] = 0
 
-    try:
-        _, pvalue, _ = coint(S1[common_idx], S2[common_idx])
-        stats['coint_pvalue'] = pvalue
-    except:
+    if stats.get('profit_factor', 0) >= 1.5 and stats.get('total_trades', 0) >= 2:
+        try:
+            _, pvalue, _ = coint(S1[common_idx], S2[common_idx])
+            stats['coint_pvalue'] = pvalue
+        except:
+            stats['coint_pvalue'] = 1.0
+    else:
         stats['coint_pvalue'] = 1.0
 
     stats['base_s1'] = base_s1

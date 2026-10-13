@@ -21,7 +21,11 @@ import os
 import json
 import yfinance as yf
 import datetime
-import calendar
+import importlib
+import touchance_service as ts
+importlib.reload(ts)
+import daily_watchlist_page as dwp
+importlib.reload(dwp)
 
 # ============================================================
 # 頁面設定
@@ -156,6 +160,25 @@ st.markdown("""
         margin-bottom: 14px;
         font-size: 0.82rem;
         color: #e2e8f0;
+    }
+    
+    .pulse-dot-green {
+        width: 9px;
+        height: 9px;
+        background-color: #10b981;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 7px;
+        box-shadow: 0 0 8px #10b981;
+    }
+    .pulse-dot-red {
+        width: 9px;
+        height: 9px;
+        background-color: #ef4444;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 7px;
+        box-shadow: 0 0 8px #ef4444;
     }
     
     .stButton > button {
@@ -328,7 +351,7 @@ def load_price_data():
     # 3. 更新全球資產資料
     global_symbols = {
         'NQ=F': '小納斯達克期貨', 'NIY=F': '日經225期貨', 'ES=F': 'S&P500期貨', 'YM=F': '小道瓊期貨',
-        '^VIX': 'VIX恐慌指數', 'GC=F': '黃金期貨', 'CL=F': '輕原油期貨', 'SI=F': '白銀期貨', 'HG=F': '銅期貨',
+        '^VIX': 'VIX恐慌指數', 'GC=F': '黃金期貨', 'CL=F': 'CME WTI 原油期貨', 'BZ=F': 'CME 布蘭特原油期貨', 'SI=F': '白銀期貨', 'HG=F': '銅期貨',
         'EURUSD=X': '歐元/美元', 'USDJPY=X': '美元/日圓', 'GBPUSD=X': '英鎊/美元', 'AUDUSD=X': '澳幣/美元',
         'BTC-USD': '比特幣', 'ETH-USD': '以太幣',
         'SPY': 'SPDR S&P 500 ETF', 'QQQ': 'Invesco QQQ', 'DIA': 'SPDR Dow Jones', 'IWM': 'iShares Russell 2000',
@@ -379,6 +402,8 @@ def load_price_data():
                     dirty = True
                 
                 if cols_to_update:
+                    if not global_df.index.isin(df.index).all():
+                        df = df.reindex(df.index.union(global_df.index))
                     for col in cols_to_update:
                         new_series = global_df[col].dropna()
                         if not new_series.empty:
@@ -448,6 +473,10 @@ def get_ticker_names():
             if tk:
                 mapping[str(tk)] = name
 
+    # 確保 CME 原油期貨代號標記明確
+    mapping['CL=F'] = 'CME WTI 原油期貨'
+    mapping['BZ=F'] = 'CME 布蘭特原油期貨'
+
     if os.path.exists(TAIFEX_FILE):
         try:
             taifex_df = pd.read_csv(TAIFEX_FILE, encoding='utf-8-sig')
@@ -469,6 +498,38 @@ def get_stock_profile(sym, industry_df=None):
         industry_df = get_industry_data()
     
     clean_code = str(sym).replace('.TWO', '').replace('.TW', '').strip()
+
+    # CME 原油期貨專屬 Profile
+    if sym in ['CL=F', 'CL']:
+        return {
+            'ticker': 'CL=F',
+            'code': 'CL=F',
+            'name': 'CME WTI 紐約輕原油期貨',
+            'market': 'CME',
+            'category': '能源期貨',
+            'sub_industry': '國際原油期貨',
+            'industry': '能源商品',
+            'primary_product': '西德州輕原油 (WTI)',
+            'primary_ratio': 100.0,
+            'product_breakdown': 'WTI 輕原油 100%',
+            'business': 'CME 紐約商品交易所 (NYMEX) 輕質低硫原油期貨，全球流動性最大之原油定價基準，每口合約 1,000 桶，最小跳動點 $0.01/桶。',
+            'products': [('WTI 輕原油', 100.0)]
+        }
+    elif sym in ['BZ=F', 'BZ']:
+        return {
+            'ticker': 'BZ=F',
+            'code': 'BZ=F',
+            'name': 'CME 布蘭特原油期貨',
+            'market': 'CME',
+            'category': '能源期貨',
+            'sub_industry': '國際原油期貨',
+            'industry': '能源商品',
+            'primary_product': '北海布蘭特原油 (Brent)',
+            'primary_ratio': 100.0,
+            'product_breakdown': 'Brent 原油 100%',
+            'business': 'CME / ICE 國際布蘭特原油期貨，代表歐洲與跨國海運原油定價基準，每口合約 1,000 桶，最小跳動點 $0.01/桶。',
+            'products': [('Brent 布蘭特原油', 100.0)]
+        }
     
     if industry_df is not None:
         row = None
@@ -716,16 +777,28 @@ def detect_limit_days(series):
     return limit_up | limit_down
 
 
-def calc_contract_value(price):
-    return price * SHARES_PER_CONTRACT
+def is_cme_crude(sym):
+    """判斷標的是否為 CME 原油期貨 (WTI: CL=F, Brent: BZ=F)"""
+    if not sym:
+        return False
+    s = str(sym).upper().strip()
+    return s in ['CL=F', 'BZ=F'] or 'CL=F' in s or 'BZ=F' in s
 
 
-def calc_margin_per_contract(price):
-    return calc_contract_value(price) * MARGIN_RATE
+def calc_contract_value(price, sym=None):
+    """計算一口合約價值 (台股期貨=2000股；CME原油期貨=1000桶)"""
+    mult = 1000 if (sym and is_cme_crude(sym)) else SHARES_PER_CONTRACT
+    return price * mult
 
 
-def get_tick_size(price):
-    """台股與個股期貨最小升降單位 (Tick Size)"""
+def calc_margin_per_contract(price, sym=None):
+    return calc_contract_value(price, sym) * MARGIN_RATE
+
+
+def get_tick_size(price, sym=None):
+    """台股與個股期貨最小升降單位 (Tick Size)；CME 原油期貨最小跳動點固定為 0.01 美元/桶"""
+    if sym and is_cme_crude(sym):
+        return 0.01
     if price < 10:
         return 0.01
     elif price < 50:
@@ -740,29 +813,33 @@ def get_tick_size(price):
         return 5.00
 
 
-def calc_trading_cost_breakdown(price, contracts, slippage_ticks=0.0, commission=COMMISSION_PER_CONTRACT):
+def calc_trading_cost_breakdown(price, contracts, slippage_ticks=0.0, commission=COMMISSION_PER_CONTRACT, sym=None):
     """
     計算單邊交易成本明細:
-    - 期交稅 (Tax): 契約價值 * 10萬分之2
+    - 期交稅 (Tax): 台股為契約價值 * 10萬分之2；CME期貨無台灣期交稅 (0)
     - 手續費 (Commission): 每口固定金額 (預設 30 元)
-    - 滑價成本 (Slippage): 滑價跳數 * 最小跳動點 * 2000股 * 口數
+    - 滑價成本 (Slippage): 滑價跳數 * 最小跳動點 * 乘數(股數/桶數) * 口數
     """
-    contract_value = calc_contract_value(price) * contracts
-    tax = contract_value * TRADING_FEE_RATE
+    mult = 1000 if (sym and is_cme_crude(sym)) else SHARES_PER_CONTRACT
+    contract_value = price * mult * contracts
+    tax_rate = 0.0 if (sym and is_cme_crude(sym)) else TRADING_FEE_RATE
+    tax = contract_value * tax_rate
     comm = commission * contracts
-    tick = get_tick_size(price)
-    slippage = slippage_ticks * tick * SHARES_PER_CONTRACT * contracts
+    tick = get_tick_size(price, sym)
+    slippage = slippage_ticks * tick * mult * contracts
     return tax, comm, slippage
 
 
-def calc_trading_cost(price, contracts, slippage_ticks=0.0, commission=COMMISSION_PER_CONTRACT):
-    tax, comm, slippage = calc_trading_cost_breakdown(price, contracts, slippage_ticks, commission)
+def calc_trading_cost(price, contracts, slippage_ticks=0.0, commission=COMMISSION_PER_CONTRACT, sym=None):
+    tax, comm, slippage = calc_trading_cost_breakdown(price, contracts, slippage_ticks, commission, sym)
     return tax + comm + slippage
 
 
-def find_min_contracts(price_s1, price_s2):
-    """找最少配對口數（以實質股價等值平衡為目標，加入口數懲罰）"""
-    target_ratio = price_s2 / price_s1
+def find_min_contracts(price_s1, price_s2, sym1=None, sym2=None):
+    """找最少配對口數（以實質合約等值平衡為目標，加入口數懲罰）"""
+    mult1 = 1000 if (sym1 and is_cme_crude(sym1)) else SHARES_PER_CONTRACT
+    mult2 = 1000 if (sym2 and is_cme_crude(sym2)) else SHARES_PER_CONTRACT
+    target_ratio = (price_s2 * mult2) / (price_s1 * mult1)
     best_score = float('inf')
     best_s1, best_s2 = 1, 1
     for s2 in range(1, 21):
@@ -777,12 +854,12 @@ def find_min_contracts(price_s1, price_s2):
     return best_s1, best_s2
 
 
-def calc_max_contracts(price_s1, price_s2, capital, margin_rate=MARGIN_RATE):
+def calc_max_contracts(price_s1, price_s2, capital, margin_rate=MARGIN_RATE, sym1=None, sym2=None):
     """根據保證金自動計算最大口數"""
-    c1_base, c2_base = find_min_contracts(price_s1, price_s2)
+    c1_base, c2_base = find_min_contracts(price_s1, price_s2, sym1, sym2)
     margin_per_unit = (
-        price_s1 * SHARES_PER_CONTRACT * margin_rate * c1_base +
-        price_s2 * SHARES_PER_CONTRACT * margin_rate * c2_base
+        calc_margin_per_contract(price_s1, sym1) * c1_base +
+        calc_margin_per_contract(price_s2, sym2) * c2_base
     )
     if margin_per_unit <= 0:
         return c1_base, c2_base, 1
@@ -831,9 +908,9 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         model_S1 = S1.copy()
         model_S2 = S2.copy()
 
-    # 偵測漲跌停
-    limit_s1 = detect_limit_days(S1)
-    limit_s2 = detect_limit_days(S2)
+    # 偵測漲跌停 (CME 原油期貨無台股 10% 漲跌停限制)
+    limit_s1 = detect_limit_days(S1) if not is_cme_crude(sym1) else pd.Series(False, index=S1.index)
+    limit_s2 = detect_limit_days(S2) if not is_cme_crude(sym2) else pd.Series(False, index=S2.index)
     any_limit = limit_s1 | limit_s2
 
     from advanced_models import get_zscore_signals, get_ou_signals, get_garch_signals, get_kalman_filter_signals, get_copula_signals, get_jump_diffusion_signals, get_sdde_signals, get_np_cusum_signals, get_gsadf_signals, get_dcc_garch_vecm_signals, get_markov_regime_signals
@@ -1015,21 +1092,26 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
 
     usable_capital = initial_capital * margin_usage_pct
 
-    if size_mode == '依保證金上限最大化（預設）':
+    mult1 = 1000 if is_cme_crude(sym1) else SHARES_PER_CONTRACT
+    mult2 = 1000 if is_cme_crude(sym2) else SHARES_PER_CONTRACT
+
+    if '最大化' in size_mode:
         contracts_s1, contracts_s2, multiplier = calc_max_contracts(
-            p1_start, p2_start, usable_capital
+            p1_start, p2_start, usable_capital, sym1=sym1, sym2=sym2
         )
     else:
-        contracts_s1, contracts_s2 = find_min_contracts(p1_start, p2_start)
-        multiplier = 1
+        multiplier = advanced_params.get('fixed_pair_multiplier', 1)
+        contracts_s1, contracts_s2 = find_min_contracts(p1_start, p2_start, sym1=sym1, sym2=sym2)
+        contracts_s1 *= multiplier
+        contracts_s2 *= multiplier
 
-    margin_s1 = calc_margin_per_contract(p1_start) * contracts_s1
-    margin_s2 = calc_margin_per_contract(p2_start) * contracts_s2
+    margin_s1 = calc_margin_per_contract(p1_start, sym1) * contracts_s1
+    margin_s2 = calc_margin_per_contract(p2_start, sym2) * contracts_s2
     total_margin_needed_start = margin_s1 + margin_s2
 
-    base_s1, base_s2 = find_min_contracts(p1_start, p2_start)
-    base_margin_s1 = calc_margin_per_contract(p1_start) * base_s1
-    base_margin_s2 = calc_margin_per_contract(p2_start) * base_s2
+    base_s1, base_s2 = find_min_contracts(p1_start, p2_start, sym1=sym1, sym2=sym2)
+    base_margin_s1 = calc_margin_per_contract(p1_start, sym1) * base_s1
+    base_margin_s2 = calc_margin_per_contract(p2_start, sym2) * base_s2
     base_margin = base_margin_s1 + base_margin_s2
 
     insufficient_margin_error = False
@@ -1039,7 +1121,11 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
 
     start_year = zscore.index[0].year
     end_year = zscore.index[-1].year
-    settlement_dates = get_third_wednesdays(start_year, end_year)
+    is_cme_pair = is_cme_crude(sym1) and is_cme_crude(sym2)
+    if is_cme_pair:
+        settlement_dates = set()  # CME 原油期貨連續月資料已平滑銜接，無台股每月第3個禮拜三強制結算日
+    else:
+        settlement_dates = get_third_wednesdays(start_year, end_year)
 
     valid_dates = zscore.index
     dates_list = list(valid_dates)
@@ -1060,7 +1146,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     if not use_grid:
         grid_levels = [{
             'id': 1, 
-            'pairs': advanced_params.get('fixed_pair_multiplier', 1),
+            'pairs': -1 if '最大化' in size_mode else advanced_params.get('fixed_pair_multiplier', 1),
             'sl_z': stop_loss_z,
             'reentry_z': reentry_cooldown_z
         }]
@@ -1092,8 +1178,8 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     def calc_leg_costs(p1, c1, p2, c2, is_settle=False):
         nonlocal total_slippage_cost, total_tax_comm_cost
         slip_t = 0.0 if is_settle else slippage_ticks
-        t1, m1, s1 = calc_trading_cost_breakdown(p1, c1, slip_t, commission)
-        t2, m2, s2 = calc_trading_cost_breakdown(p2, c2, slip_t, commission)
+        t1, m1, s1 = calc_trading_cost_breakdown(p1, c1, slip_t, commission, sym=sym1)
+        t2, m2, s2 = calc_trading_cost_breakdown(p2, c2, slip_t, commission, sym=sym2)
         slip = s1 + s2
         feetax = t1 + m1 + t2 + m2
         total_slippage_cost += slip
@@ -1101,13 +1187,13 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         return feetax + slip, slip, feetax
     
     def get_trade_size(p1, p2, pairs, available_cash):
-        if pairs == -1 or size_mode == '依保證金上限最大化（預設）':
-            c1, c2, _ = calc_max_contracts(p1, p2, available_cash)
+        if pairs == -1 or '最大化' in size_mode:
+            c1, c2, _ = calc_max_contracts(p1, p2, available_cash, sym1=sym1, sym2=sym2)
         else:
-            c1, c2 = find_min_contracts(p1, p2)
+            c1, c2 = find_min_contracts(p1, p2, sym1=sym1, sym2=sym2)
             c1 *= pairs
             c2 *= pairs
-        req = calc_margin_per_contract(p1) * c1 + calc_margin_per_contract(p2) * c2
+        req = calc_margin_per_contract(p1, sym1) * c1 + calc_margin_per_contract(p2, sym2) * c2
         return c1, c2, req
 
     def make_desc(dir_sign, c1, c2):
@@ -1144,14 +1230,14 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                 total_c1 += state['c1']
                 total_c2 += state['c2']
                 
-                margin_required_today += calc_margin_per_contract(p1) * state['c1'] + calc_margin_per_contract(p2) * state['c2']
+                margin_required_today += calc_margin_per_contract(p1, sym1) * state['c1'] + calc_margin_per_contract(p2, sym2) * state['c2']
                 
                 if pos == 1:
-                    pnl_s2 = (p2 - state['entry_p2']) * SHARES_PER_CONTRACT * state['c2']
-                    pnl_s1 = (state['entry_p1'] - p1) * SHARES_PER_CONTRACT * state['c1']
+                    pnl_s2 = (p2 - state['entry_p2']) * mult2 * state['c2']
+                    pnl_s1 = (state['entry_p1'] - p1) * mult1 * state['c1']
                 else:
-                    pnl_s2 = (state['entry_p2'] - p2) * SHARES_PER_CONTRACT * state['c2']
-                    pnl_s1 = (p1 - state['entry_p1']) * SHARES_PER_CONTRACT * state['c1']
+                    pnl_s2 = (state['entry_p2'] - p2) * mult2 * state['c2']
+                    pnl_s1 = (p1 - state['entry_p1']) * mult1 * state['c1']
                 
                 state['unrealized_pnl'] = pnl_s1 + pnl_s2
                 unrealized_pnl += (pnl_s1 + pnl_s2)
@@ -1390,7 +1476,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                         else:
                             action += f'[網格{params["id"]}] 資金不足 '
 
-        margin_required_today = sum(calc_margin_per_contract(p1)*s['c1'] + calc_margin_per_contract(p2)*s['c2'] for s in grid_states if s['is_active'])
+        margin_required_today = sum(calc_margin_per_contract(p1, sym1)*s['c1'] + calc_margin_per_contract(p2, sym2)*s['c2'] for s in grid_states if s['is_active'])
         unrealized_pnl = sum(s.get('unrealized_pnl', 0.0) for s in grid_states if s['is_active'])
         
         frozen_margin = margin_required_today
@@ -1502,6 +1588,9 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     stats['stop_loss_count'] = stop_loss_count
     stats['slippage_ticks'] = slippage_ticks
     stats['stop_loss_z'] = stop_loss_z if enable_stop_loss else None
+    stats['mult1'] = mult1
+    stats['mult2'] = mult2
+    stats['is_cme_pair'] = is_cme_pair
 
     margin_when_holding = df_records[df_records['持倉'] != 0]['凍結保證金']
     if not margin_when_holding.empty:
@@ -1526,6 +1615,270 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
         stats['coint_pvalue'] = None
 
     return df_records, df_trades, stats
+
+
+# ============================================================
+# Touchance 4 即時 1分K 串流與自動更新模組
+# ============================================================
+def render_touchance_live_content():
+    # 確保背景收集服務正在運作
+    if not ts.is_collector_running():
+        ts.start_collector_service(interval_sec=15)
+
+    st_status = ts.get_latest_status()
+    is_conn = st_status.get("connected", False)
+
+    # 1. 連線狀態與存儲統計卡
+    col_stat1, col_stat2, col_stat3, col_stat4 = st.columns([2.6, 1.8, 1.8, 1.4])
+    with col_stat1:
+        if is_conn:
+            sess_str = f"#{st_status.get('session_id')}" if st_status.get('session_id') else "活躍"
+            st.markdown(f"""
+            <div style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.4); border-radius: 8px; padding: 7px 12px;">
+                <div style="color: #10b981; font-weight: 700; font-size: 0.92rem; display: flex; align-items: center;">
+                    <span class="pulse-dot-green"></span> Touchance 4 連線正常 (Session {sess_str})
+                </div>
+                <div style="font-size: 0.74rem; color: #94a3b8; margin-top: 3px;">
+                    通訊埠: <code>127.0.0.1:10203</code> ｜ 延遲: <b>{st_status.get('latency_ms', 0):.1f} ms</b> ｜ 狀態: 正常接收
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style="background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 8px; padding: 7px 12px;">
+                <div style="color: #ef4444; font-weight: 700; font-size: 0.92rem; display: flex; align-items: center;">
+                    <span class="pulse-dot-red"></span> Touchance 4 離線中 (Port 10203 未開)
+                </div>
+                <div style="font-size: 0.74rem; color: #fca5a5; margin-top: 3px;">
+                    請確認 TC4 是否已登入 ｜ 目前使用備援數據源接收
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with col_stat2:
+        bars_cnt = st_status.get("total_bars_saved", 0)
+        st.markdown(f"""
+        <div style="background: rgba(15,23,42,0.6); padding: 7px 12px; border-radius: 8px; border: 1px solid #334155;">
+            <div style="font-size: 0.72rem; color: #94a3b8;">📥 累積儲存 1分K 數據</div>
+            <div style="font-size: 1.15rem; font-weight: 700; color: #38bdf8;">{bars_cnt:,} 根 K棒</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_stat3:
+        last_t = st_status.get("last_bar_time", "等待數據")
+        if last_t:
+            last_t_short = last_t.split()[-1] if " " in str(last_t) else last_t
+        else:
+            last_t_short = "N/A"
+        st.markdown(f"""
+        <div style="background: rgba(15,23,42,0.6); padding: 7px 12px; border-radius: 8px; border: 1px solid #334155;">
+            <div style="font-size: 0.72rem; color: #94a3b8;">⏱️ 最新 K棒 時間</div>
+            <div style="font-size: 1.15rem; font-weight: 700; color: #fcd34d;">{last_t_short}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_stat4:
+        if st.button("🔄 立即同步", use_container_width=True, help="立即向報價源抓取最新 1 分 K 棒並寫入資料庫"):
+            with st.spinner("同步中..."):
+                cnt = ts.fetch_and_save_1m_quotes()
+                st.toast(f"成功同步最新 {cnt} 筆 1分K 數據！", icon="✅")
+                st.rerun()
+
+    st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+
+    # 2. 4 大即時指標卡
+    m1, m2, m3, m4 = st.columns(4)
+    wti_p = st_status.get("last_wti")
+    brent_p = st_status.get("last_brent")
+    spr_p = st_status.get("last_spread")
+    z_p = st_status.get("last_zscore")
+
+    with m1:
+        if wti_p is not None:
+            st.markdown(f"""
+            <div class="metric-card" style="padding: 0.8rem 1rem;">
+                <div class="label">🛢️ CME WTI 輕原油 (CL)</div>
+                <div class="value" style="font-size: 1.35rem; color: #38bdf8;">${wti_p:.2f} <span style="font-size:0.75rem; color:#94a3b8;">/桶</span></div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.metric("CME WTI 輕原油 (CL)", "載入中...")
+
+    with m2:
+        if brent_p is not None:
+            st.markdown(f"""
+            <div class="metric-card" style="padding: 0.8rem 1rem;">
+                <div class="label">🛢️ CME Brent 布蘭特 (BZ)</div>
+                <div class="value" style="font-size: 1.35rem; color: #f472b6;">${brent_p:.2f} <span style="font-size:0.75rem; color:#94a3b8;">/桶</span></div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.metric("CME Brent 布蘭特 (BZ)", "載入中...")
+
+    with m3:
+        if spr_p is not None:
+            spr_color = "#34d399" if spr_p <= 3.0 else ("#f87171" if spr_p >= 7.25 else "#fbbf24")
+            diff_mean = spr_p - 4.61
+            st.markdown(f"""
+            <div class="metric-card" style="padding: 0.8rem 1rem;">
+                <div class="label">📏 即時價差 (Brent - WTI)</div>
+                <div class="value" style="font-size: 1.35rem; color: {spr_color};">${spr_p:.2f} <span style="font-size:0.72rem; color:#94a3b8;">(均差 {diff_mean:+.2f})</span></div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.metric("即時價差", "載入中...")
+
+    with m4:
+        if z_p is not None:
+            z_color = "#34d399" if z_p <= -2.0 else ("#f87171" if z_p >= 2.0 else "#94a3b8")
+            st.markdown(f"""
+            <div class="metric-card" style="padding: 0.8rem 1rem;">
+                <div class="label">📈 60分K 動態 Z-Score</div>
+                <div class="value" style="font-size: 1.35rem; color: {z_color};">{z_p:+.2f} <span style="font-size:0.72rem; color:#94a3b8;">σ</span></div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.metric("動態 Z-Score", "載入中...")
+
+    # 3. 實時交易訊號提示
+    sig_text = st_status.get("signal", "⚪ 常態震盪 (觀望)")
+    if "做多" in sig_text:
+        st.success(f"💡 **實時收斂訊號提示**：{sig_text} ── 價差位於歷史低位，向均值回歸做多期望值高！")
+    elif "做空" in sig_text:
+        st.error(f"🚨 **實時收斂訊號提示**：{sig_text} ── 價差過度放大突破做空警戒線，做空收斂回歸機率大！")
+    else:
+        st.info(f"📊 **市場狀態**：{sig_text} ── 價差位於常態震盪中樞 ($3.64 ~ $5.53 美元)，等待突破進場邊界。")
+
+    # 4. 繪製即時 K 棒雙面板走勢圖 (支援 1分K 與 5分K 切換)
+    chart_col1, chart_col2 = st.columns([2, 1])
+    with chart_col1:
+        st.markdown("#### 📈 即時原油價格走勢與價差收斂監控圖")
+    with chart_col2:
+        chosen_freq = st.radio("K棒週期切換", ["1 分 K", "5 分 K (推薦·收斂平穩)"], index=1, horizontal=True, label_visibility="collapsed")
+
+    if "5" in chosen_freq:
+        df_recent = ts.get_stored_5m_data(limit=100)
+        freq_title = "5 分 K"
+    else:
+        df_recent = ts.get_stored_1m_data(limit=100)
+        freq_title = "1 分 K"
+
+    # 防禦性欄位標準化 (Defensive column standardization)
+    if isinstance(df_recent, pd.DataFrame) and not df_recent.empty:
+        col_rename = {}
+        for c in df_recent.columns:
+            c_str = str(c).strip()
+            c_low = c_str.lower()
+            if c_low in ['datetime', 'date', 'time', 'ts'] and 'timestamp' not in df_recent.columns:
+                col_rename[c] = 'timestamp'
+            elif c_low in ['wti_close', 'wti', 'cl', 'cl_close'] and 'wti_close' not in df_recent.columns:
+                col_rename[c] = 'wti_close'
+            elif c_low in ['brent_close', 'brent', 'bz', 'bz_close'] and 'brent_close' not in df_recent.columns:
+                col_rename[c] = 'brent_close'
+            elif c_low in ['spread', 'diff'] and 'spread' not in df_recent.columns:
+                col_rename[c] = 'spread'
+        if col_rename:
+            df_recent = df_recent.rename(columns=col_rename)
+
+        if 'timestamp' not in df_recent.columns:
+            if isinstance(df_recent.index, pd.DatetimeIndex):
+                df_recent = df_recent.reset_index().rename(columns={df_recent.index.name or 'index': 'timestamp'})
+            else:
+                df_recent['timestamp'] = pd.date_range(end=datetime.datetime.now(), periods=len(df_recent), freq='5min' if "5" in chosen_freq else '1min')
+
+        if 'spread' not in df_recent.columns and 'brent_close' in df_recent.columns and 'wti_close' in df_recent.columns:
+            df_recent['spread'] = df_recent['brent_close'].astype(float) - df_recent['wti_close'].astype(float)
+
+    req_cols = ['timestamp', 'brent_close', 'wti_close', 'spread']
+    has_valid_data = (
+        isinstance(df_recent, pd.DataFrame) and 
+        not df_recent.empty and 
+        len(df_recent) >= 5 and 
+        all(c in df_recent.columns for c in req_cols)
+    )
+
+    if has_valid_data:
+        try:
+            fig_rt = make_subplots(
+                rows=2, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.08,
+                subplot_titles=(f'🛢️ 即時 {freq_title} 原油價格走勢 (USD/桶)', f'📏 即時 {freq_title} 價差走勢與動態收斂邊界 ($/桶)'),
+                row_heights=[0.55, 0.45]
+            )
+
+            fig_rt.add_trace(go.Scatter(
+                x=df_recent['timestamp'], y=df_recent['brent_close'],
+                name='Brent 布蘭特原油', line=dict(color='#f472b6', width=2)
+            ), row=1, col=1)
+            fig_rt.add_trace(go.Scatter(
+                x=df_recent['timestamp'], y=df_recent['wti_close'],
+                name='WTI 紐約輕原油', line=dict(color='#38bdf8', width=2)
+            ), row=1, col=1)
+
+            fig_rt.add_trace(go.Scatter(
+                x=df_recent['timestamp'], y=df_recent['spread'],
+                name='實際價差 (Brent - WTI)', line=dict(color='#2dd4bf', width=2.2)
+            ), row=2, col=1)
+
+            fig_rt.add_hline(y=7.25, line=dict(color='#f87171', width=1.5, dash='dash'), annotation_text='做空警戒 $7.25', row=2, col=1)
+            fig_rt.add_hline(y=3.00, line=dict(color='#34d399', width=1.5, dash='dash'), annotation_text='做多警戒 $3.00', row=2, col=1)
+            fig_rt.add_hline(y=4.61, line=dict(color='#fbbf24', width=1.2, dash='dot'), annotation_text='常態均值 $4.61', row=2, col=1)
+
+            fig_rt.update_layout(
+                height=400,
+                template='plotly_dark',
+                margin=dict(l=40, r=40, t=35, b=25),
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                hovermode='x unified'
+            )
+            st.plotly_chart(fig_rt, use_container_width=True)
+        except Exception as chart_err:
+            st.warning(f"⚠️ 即時圖表渲染暫時中斷: {chart_err}")
+    else:
+        st.info(f"⏳ 正在載入或同步 {freq_title} 價差數據中，請稍候...")
+
+        # 5. CSV 下載按鈕 (支援 1分K 與 5分K)
+        dl_c1, dl_c2 = st.columns(2)
+        with dl_c1:
+            csv_file_path = ts.CSV_PATH
+            if os.path.exists(csv_file_path):
+                with open(csv_file_path, "rb") as f_csv:
+                    st.download_button(
+                        label=f"📥 下載 1 分 K 資料庫快照 ({bars_cnt:,} 筆 CSV)",
+                        data=f_csv,
+                        file_name=f"cme_crude_oil_1m_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+        with dl_c2:
+            csv_5m_path = os.path.join(ts.DATA_DIR, "crude_oil_5m.csv")
+            if os.path.exists(csv_5m_path):
+                with open(csv_5m_path, "rb") as f_5m:
+                    st.download_button(
+                        label=f"📥 下載 5 分 K 完整高頻資料庫 (12,435 筆 CSV)",
+                        data=f_5m,
+                        file_name=f"cme_crude_oil_5m_12k_bars_{datetime.datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+
+
+# Streamlit Native Auto-Refresh Fragments (自動更新片段)
+@st.fragment(run_every="5s")
+def render_live_monitor_5s():
+    render_touchance_live_content()
+
+@st.fragment(run_every="10s")
+def render_live_monitor_10s():
+    render_touchance_live_content()
+
+@st.fragment(run_every="30s")
+def render_live_monitor_30s():
+    render_touchance_live_content()
+
+def render_live_monitor_manual():
+    render_touchance_live_content()
 
 
 # ============================================================
@@ -1602,18 +1955,53 @@ def main():
     # 側邊欄: 參數設定
     # ============================================================
     with st.sidebar:
-        st.markdown("## ⚙️ 回測參數設定")
+        st.markdown("## 🧭 系統功能導覽")
+        nav_mode = st.radio(
+            "請選擇功能頁面",
+            [
+                "🎯 今日精選收斂監控 (PF > 2.0 每日推薦)",
+                "📊 單一配對深入回測分析"
+            ],
+            index=0,
+            help="【今日精選收斂監控】：自動計算全市場同細產業雙天期 (20日/60日) 獲利因子 > 2.0 的優質配對，即時顯示當前 Z 分數、停利價差目標與進場信號！\n【單一配對深入回測分析】：自選兩檔標的進行完整資金曲線與網格回測。"
+        )
         st.markdown("---")
 
+        # 報價資料來源指示 (預設使用免 API Key 的免費開放報價來源)
+        st.markdown("### 📡 報價資料來源")
+        st.markdown("""
+        <div style="background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 8px; padding: 8px 12px; margin-bottom: 10px;">
+            <div style="color: #60a5fa; font-weight: 700; font-size: 0.85rem; display: flex; align-items: center;">
+                <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#10b981; margin-right:6px; box-shadow: 0 0 6px #10b981;"></span> 免費 API 模式 (免金鑰)
+            </div>
+            <div style="color: #94a3b8; font-size: 0.72rem; margin-top: 3px;">
+                資料源：Yahoo Finance / TWSE 每日歷史日 K 資料庫 (自動同步)
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if nav_mode == "🎯 今日精選收斂監控 (PF > 2.0 每日推薦)":
+            st.markdown(r"""
+            **💡 今日操作原則**：
+            1. **進場門檻**：當價差達到 $|Z| \ge 2.0$ 視為極值，進場做收斂（$|Z| \ge 3.0$ 極端偏離亦照常進場做收斂）。
+            2. **停利點位**：當價差回歸至均值 $Z=0$ 時全數停利出場。
+            3. **持倉原則**：預設不設停損，耐心持倉等待價差收斂回歸至 $Z=0$ 平倉。
+            """)
+            if st.button("🔄 重新載入最新配對主檔", use_container_width=True):
+                st.cache_data.clear()
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("## ⚙️ 回測參數設定")
         st.markdown("### 📌 選擇配對標的")
         pair_mode = st.radio(
             "標的挑選模式",
-            ["🎯 依細產業族群挑選 (推薦·高連動)", "🌐 全市場自選 (依細產業排序)"],
+            ["🌐 全市場自選 (依細產業排序)（預設）", "🎯 依細產業族群挑選 (推薦·高連動)"],
             index=0,
-            help="【依細產業族群挑選】：僅篩選同一細產業之同業標的，具備高度產品營收連動性與協整基礎，大幅降低走勢發散風險！"
+            help="【全市場自選】：可在全市場所有標的中自由搜尋並挑選標的 A 與標的 B。\n【依細產業族群挑選】：僅篩選同一細產業之同業標的。"
         )
 
-        if pair_mode == "🎯 依細產業族群挑選 (推薦·高連動)":
+        if "依細產業族群" in pair_mode:
             default_sub = "銅箔基板 (CCL)" if "銅箔基板 (CCL)" in all_available_subs else (sorted_subs[0] if sorted_subs else all_available_subs[0])
             sel_sub_idx = all_available_subs.index(default_sub) if default_sub in all_available_subs else 0
             selected_sub = st.selectbox(
@@ -1665,15 +2053,15 @@ def main():
                     default_s2 = 1 if len(sub_tickers) > 1 else 0
 
             st.markdown("#### 🅰️ 標的 A (Leg 1)")
-            sym1 = st.selectbox("標的 A (Leg 1)", sub_tickers, index=default_s1, format_func=fmt_ticker_simple, key='sym1', label_visibility="collapsed")
+            sym1 = st.selectbox("標的 A (Leg 1)", sub_tickers, index=default_s1, format_func=fmt_ticker_simple, key='sym1_sub')
             st.markdown(render_sidebar_stock_badge(stock_profiles[sym1], sym1, "A", "sky"), unsafe_allow_html=True)
 
             st.markdown("#### 🅱️ 標的 B (Leg 2)")
-            sym2 = st.selectbox("標的 B (Leg 2)", sub_tickers, index=default_s2, format_func=fmt_ticker_simple, key='sym2', label_visibility="collapsed")
+            sym2 = st.selectbox("標的 B (Leg 2)", sub_tickers, index=default_s2, format_func=fmt_ticker_simple, key='sym2_sub')
             st.markdown(render_sidebar_stock_badge(stock_profiles[sym2], sym2, "B", "pink"), unsafe_allow_html=True)
 
         else:
-            # 全市場自選: 依細產業分組排序
+            # 全市場自選: 依細產業分組排序，支援搜尋全市場所有標的
             sorted_all_tickers = sorted(
                 tickers,
                 key=lambda t: (stock_profiles[t]['sub_industry'], t)
@@ -1681,47 +2069,95 @@ def main():
             default_s1 = sorted_all_tickers.index('2383.TW') if '2383.TW' in sorted_all_tickers else 0
             default_s2 = sorted_all_tickers.index('6213.TW') if '6213.TW' in sorted_all_tickers else (sorted_all_tickers.index('6274.TWO') if '6274.TWO' in sorted_all_tickers else 1)
 
-            # 全市場獲利因子 > 3.0 推薦一鍵帶入
-            chosen_pf = None
-            if high_pf_df is not None and not high_pf_df.empty:
-                pf_labels = ["-- 手動挑選下方全市場標的 --"] + [
+            # 推薦配對資料準備
+            coint_top = [p for p in sub_pairs if p.get('IsCointegrated') or p.get('CointPValue', 1.0) < 0.05][:20]
+            pf_labels = ["-- 手動挑選下方全市場標的 --"] + (
+                [
                     f"🔥 [{r['SubIndustry']}] {r['Name1']} vs {r['Name2']} ｜ PF {r['ProfitFactor']:.2f} ｜ 勝率 {r['WinRate']:.1f}% ｜ 報酬 {r['TotalReturnPct']:+.1f}%"
                     for _, r in high_pf_df.iterrows()
-                ]
-                chosen_pf = st.selectbox("🔥 獲利因子 > 3.0 同業精選 (一鍵帶入)", pf_labels, index=0)
-                if chosen_pf != pf_labels[0]:
-                    p_idx = pf_labels.index(chosen_pf) - 1
-                    target_row = high_pf_df.iloc[p_idx]
-                    t1, t2 = target_row['Ticker1'], target_row['Ticker2']
+                ] if high_pf_df is not None and not high_pf_df.empty else []
+            )
+            coint_labels = ["-- 手動挑選下方全市場標的 --"] + (
+                [
+                    f"{p['Pair']} ({p['Name1']} vs {p['Name2']}) · {p['SubIndustry']} ｜ {p['Rating']}"
+                    for p in coint_top
+                ] if coint_top else []
+            )
+
+            # 回調函式：當從精選推薦點選一鍵帶入時，自動更新標的 A / B
+            def _apply_pf_preset():
+                chosen = st.session_state.get('preset_pf')
+                if chosen and chosen != pf_labels[0]:
+                    idx = pf_labels.index(chosen) - 1
+                    row = high_pf_df.iloc[idx]
+                    t1, t2 = row['Ticker1'], row['Ticker2']
                     if t1 in sorted_all_tickers:
-                        default_s1 = sorted_all_tickers.index(t1)
+                        st.session_state['sym1_all'] = t1
                     if t2 in sorted_all_tickers:
-                        default_s2 = sorted_all_tickers.index(t2)
+                        st.session_state['sym2_all'] = t2
 
-            # 全市場高協整推薦一鍵帶入
-            if not chosen_pf or chosen_pf == pf_labels[0]:
-                coint_top = [p for p in sub_pairs if p.get('IsCointegrated') or p.get('CointPValue', 1.0) < 0.05][:20]
-                if coint_top:
-                    coint_labels = ["-- 手動挑選下方全市場標的 --"] + [
-                        f"{p['Pair']} ({p['Name1']} vs {p['Name2']}) · {p['SubIndustry']} ｜ {p['Rating']}"
-                        for p in coint_top
-                    ]
-                    chosen_coint = st.selectbox("💡 全市場精選高協整配對 (一鍵帶入)", coint_labels, index=0)
-                    if chosen_coint != coint_labels[0]:
-                        c_idx = coint_labels.index(chosen_coint) - 1
-                        tp = coint_top[c_idx]
-                        if tp['Ticker1'] in sorted_all_tickers:
-                            default_s1 = sorted_all_tickers.index(tp['Ticker1'])
-                        if tp['Ticker2'] in sorted_all_tickers:
-                            default_s2 = sorted_all_tickers.index(tp['Ticker2'])
+            def _apply_coint_preset():
+                chosen = st.session_state.get('preset_coint')
+                if chosen and chosen != coint_labels[0]:
+                    idx = coint_labels.index(chosen) - 1
+                    tp = coint_top[idx]
+                    t1, t2 = tp['Ticker1'], tp['Ticker2']
+                    if t1 in sorted_all_tickers:
+                        st.session_state['sym1_all'] = t1
+                    if t2 in sorted_all_tickers:
+                        st.session_state['sym2_all'] = t2
 
-            st.markdown("#### 🅰️ 標的 A (Leg 1)")
-            sym1 = st.selectbox("標的 A (Leg 1)", sorted_all_tickers, index=default_s1, format_func=fmt_ticker_grouped, key='sym1', label_visibility="collapsed")
+            # 初始化 session_state
+            if 'sym1_all' not in st.session_state or st.session_state['sym1_all'] not in sorted_all_tickers:
+                st.session_state['sym1_all'] = sorted_all_tickers[default_s1]
+            if 'sym2_all' not in st.session_state or st.session_state['sym2_all'] not in sorted_all_tickers:
+                st.session_state['sym2_all'] = sorted_all_tickers[default_s2]
+
+            idx1 = sorted_all_tickers.index(st.session_state['sym1_all'])
+            idx2 = sorted_all_tickers.index(st.session_state['sym2_all'])
+
+            st.markdown("#### 🅰️ 標的 A (Leg 1) · 全市場搜尋")
+            sym1 = st.selectbox(
+                "標的 A (Leg 1)", 
+                sorted_all_tickers, 
+                index=idx1, 
+                format_func=fmt_ticker_grouped, 
+                key='sym1_all',
+                help="直接輸入代號（如 2330）或公司名稱即可快速搜尋並選取全市場標的"
+            )
             st.markdown(render_sidebar_stock_badge(stock_profiles[sym1], sym1, "A", "sky"), unsafe_allow_html=True)
 
-            st.markdown("#### 🅱️ 標的 B (Leg 2)")
-            sym2 = st.selectbox("標的 B (Leg 2)", sorted_all_tickers, index=default_s2, format_func=fmt_ticker_grouped, key='sym2', label_visibility="collapsed")
+            st.markdown("#### 🅱️ 標的 B (Leg 2) · 全市場搜尋")
+            sym2 = st.selectbox(
+                "標的 B (Leg 2)", 
+                sorted_all_tickers, 
+                index=idx2, 
+                format_func=fmt_ticker_grouped, 
+                key='sym2_all',
+                help="直接輸入代號（如 2317）或公司名稱即可快速搜尋並選取全市場標的"
+            )
             st.markdown(render_sidebar_stock_badge(stock_profiles[sym2], sym2, "B", "pink"), unsafe_allow_html=True)
+
+            # 快速推薦選單收納至 Expander，不再阻礙使用者自由搜尋
+            with st.expander("💡 快速載入精選推薦配對 (選填·一鍵帶入)", expanded=False):
+                if len(pf_labels) > 1:
+                    st.selectbox(
+                        "🔥 獲利因子 > 3.0 同業精選 (一鍵帶入)",
+                        pf_labels,
+                        index=0,
+                        key='preset_pf',
+                        on_change=_apply_pf_preset,
+                        help="選擇任一精選組合，系統將自動同步帶入上方的標的 A 與標的 B"
+                    )
+                if len(coint_labels) > 1:
+                    st.selectbox(
+                        "💡 全市場精選高協整配對 (一鍵帶入)",
+                        coint_labels,
+                        index=0,
+                        key='preset_coint',
+                        on_change=_apply_coint_preset,
+                        help="選擇任一精選組合，系統將自動同步帶入上方的標的 A 與標的 B"
+                    )
 
         # 側邊欄配對關係總結 Pill
         st.markdown(render_sidebar_pair_diagnostic(stock_profiles[sym1], stock_profiles[sym2], sym1, sym2, sub_pairs), unsafe_allow_html=True)
@@ -1760,16 +2196,16 @@ def main():
         
         st.markdown("### 💰 資金滿載設定")
         size_mode = st.radio("資金佈局模式", 
-                             options=['依保證金上限最大化（預設）', '最少配對口數 (僅基本單位)'],
+                             options=['最少配對口數 (僅基本單位)（預設）', '依保證金上限最大化'],
                              index=0,
-                             help="選擇是否要讓系統自動把資金運用到極限")
+                             help="選擇資金佈局模式：預設以最少配對口數（1組基本單位）進行交易")
         
         margin_usage_pct = 1.0
         fixed_pair_multiplier = 1
-        if size_mode == '依保證金上限最大化（預設）':
+        if '最大化' in size_mode:
             margin_usage_pct = st.slider("最高保證金利用率 (%)", 0, 100, 100, 5, help="限制這筆資金最高只能被利用的比例") / 100.0
         else:
-            fixed_pair_multiplier = st.slider("固定配對口數倍數", 1, 10, 1, 1, help="調整基本單位的倍數 (例如設定2代表每次進場2組基本配對)")
+            fixed_pair_multiplier = st.slider("固定配對口數倍數", 1, 10, 1, 1, help="調整基本單位的倍數 (預設1代表每次進場1組最小配對口數)")
 
         st.markdown("---")
         st.markdown("### 🧭 交易邏輯與方向")
@@ -1909,7 +2345,7 @@ def main():
 
         st.markdown("---")
         st.markdown("### 🕸️ 網格配對交易設定")
-        use_grid = st.toggle("啟用獨立網格模式", value=True, help="每一層網格獨立運作，擁有專屬的進場、停利、停損與重新建倉門檻。若關閉，則退回單一進出場模式，並自動套用上方高階模型的動態邊界。")
+        use_grid = st.toggle("啟用獨立網格模式", value=False, help="每一層網格獨立運作，擁有專屬的進場、停利、停損與重新建倉門檻。若關閉，則退回單一進出場模式，並自動套用上方高階模型的動態邊界。")
         
         grid_levels = []
         if use_grid:
@@ -1938,7 +2374,7 @@ def main():
         st.markdown("---")
         st.markdown("### 🛑 停損線與風險控管設定")
         if not use_grid:
-            enable_stop_loss = st.toggle("啟用 Z-Score 停損線", value=True, help="當價差持續逆勢走揚/下殺超過停損閾值時，強制停損出場，截斷結構性發散大賠風險。")
+            enable_stop_loss = st.toggle("啟用 Z-Score 停損線", value=False, help="預設不設停損，持倉直至價差完全均值回歸中樞 (Z=0) 時停利出場。若開啟，當價差持續逆勢走揚/下殺超過停損閾值時強制停損。")
             if enable_stop_loss:
                 stop_loss_z = st.number_input("停損門檻 (Z 絕對值)", min_value=1.5, max_value=10.0, value=3.5, step=0.1, help="當 Z 分數絕對值突破此數值時，立即執行停損平倉。推薦設定 3.0 ~ 4.0。")
                 reentry_cooldown_z = st.number_input("停損後冷卻重啟門檻 (Z 絕對值)", min_value=0.5, max_value=5.0, value=2.0, step=0.1, help="停損後，必須等到 Z 分數回落至此閾值以內，才允許重新開倉，防止在極端行情中連續被洗出場。")
@@ -1946,8 +2382,8 @@ def main():
                 stop_loss_z = 999.0
                 reentry_cooldown_z = 2.0
         else:
-            enable_stop_loss = True
-            stop_loss_z = 3.5
+            enable_stop_loss = False
+            stop_loss_z = 999.0
             reentry_cooldown_z = 2.0
             st.caption("ℹ️ 網格模式下，已於上方各層網格獨立自訂專屬停損門檻 (Z) 與重啟冷卻門檻。")
 
@@ -1964,20 +2400,46 @@ def main():
             help="期貨商個股期貨單邊手續費，預設 30 元/口"
         )
 
-        st.markdown("### 📋 股期規格")
-        st.info(f"""
-        - **1 口 = {SHARES_PER_CONTRACT:,} 股 (2 張)**
-        - **保證金比率: {MARGIN_RATE*100:.1f}%**
-        - **期交稅: {TRADING_FEE_RATE*100000:.0f}/100,000 (單邊)**
-        - **手續費: {custom_commission} 元/口 (單邊)**
-        - **滑價設定: {slippage_ticks} 檔跳數 (單邊)**
-        - **漲跌停: ±{LIMIT_PCT*100:.0f}% 不可交易**
-        - **結算日: 每月第3個禮拜三**
-        - **轉倉: 結算平倉→次日開倉**
-        """)
+        is_cme_selected = is_cme_crude(sym1) or is_cme_crude(sym2)
+        if is_cme_selected:
+            st.markdown("### 📋 CME 原油期貨合約規格")
+            st.info(f"""
+            - **標的交易所: 芝加哥商業交易所 (CME Group)**
+            - **1 口合約 = 1,000 桶 (Barrels)**
+            - **最小跳動點 (Tick): 0.01 美元/桶 ($10/口)**
+            - **保證金比率: {MARGIN_RATE*100:.1f}%**
+            - **期交稅: 免台灣期交稅 (0 元)**
+            - **手續費: {custom_commission} 元/口 (單邊)**
+            - **滑價設定: {slippage_ticks} 檔跳數 (單邊)**
+            - **漲跌停: CME 原油無台股 ±10% 限制**
+            - **合約類型: 近月連續合約 (Continuous Front-Month)**
+            """)
+        else:
+            st.markdown("### 📋 股期規格")
+            st.info(f"""
+            - **1 口 = {SHARES_PER_CONTRACT:,} 股 (2 張)**
+            - **保證金比率: {MARGIN_RATE*100:.1f}%**
+            - **期交稅: {TRADING_FEE_RATE*100000:.0f}/100,000 (單邊)**
+            - **手續費: {custom_commission} 元/口 (單邊)**
+            - **滑價設定: {slippage_ticks} 檔跳數 (單邊)**
+            - **漲跌停: ±{LIMIT_PCT*100:.0f}% 不可交易**
+            - **結算日: 每月第3個禮拜三**
+            - **轉倉: 結算平倉→次日開倉**
+            """)
 
         st.markdown("---")
         run_btn = st.button("🚀 執行回測", type="primary", use_container_width=True)
+
+    # ============================================================
+    # 頁面分流導覽
+    # ============================================================
+    if nav_mode == "🎯 今日精選收斂監控 (PF > 2.0 每日推薦)":
+        dwp.render_watchlist_page(prices_df=prices)
+        return
+
+    if not run_btn:
+        st.info("👈 請在左側設定回測標的與參數，並點擊【🚀 執行回測】按鈕開始分析！")
+
 
     # ============================================================
     # 主面板: 執行結果
@@ -2109,17 +2571,19 @@ def main():
         # 詳細計算
         with st.expander("📐 詳細保證金計算", expanded=False):
             calc_col1, calc_col2 = st.columns(2)
+            m1_unit = "桶" if stats.get('mult1', 2000) == 1000 else "股"
+            m2_unit = "桶" if stats.get('mult2', 2000) == 1000 else "股"
             with calc_col1:
                 st.markdown(f"""
                 **{sym1}** (起始價: {stats['p1_start']:.2f})
-                - 合約價值 = {stats['p1_start']:.2f} × {SHARES_PER_CONTRACT:,} = **{calc_contract_value(stats['p1_start']):,.0f}**
-                - {stats['base_s1']} 口基本保證金 = {calc_contract_value(stats['p1_start']):,.0f} × {MARGIN_RATE*100:.1f}% × {stats['base_s1']} = **{stats['margin_s1']/max(1, stats['multiplier']):,.0f}**
+                - 合約價值 = {stats['p1_start']:.2f} × {stats.get('mult1', SHARES_PER_CONTRACT):,} {m1_unit} = **{calc_contract_value(stats['p1_start'], sym1):,.0f}**
+                - {stats['base_s1']} 口基本保證金 = {calc_contract_value(stats['p1_start'], sym1):,.0f} × {MARGIN_RATE*100:.1f}% × {stats['base_s1']} = **{stats['margin_s1']/max(1, stats['multiplier']):,.0f}**
                 """)
             with calc_col2:
                 st.markdown(f"""
                 **{sym2}** (起始價: {stats['p2_start']:.2f})
-                - 合約價值 = {stats['p2_start']:.2f} × {SHARES_PER_CONTRACT:,} = **{calc_contract_value(stats['p2_start']):,.0f}**
-                - {stats['base_s2']} 口基本保證金 = {calc_contract_value(stats['p2_start']):,.0f} × {MARGIN_RATE*100:.1f}% × {stats['base_s2']} = **{stats['margin_s2']/max(1, stats['multiplier']):,.0f}**
+                - 合約價值 = {stats['p2_start']:.2f} × {stats.get('mult2', SHARES_PER_CONTRACT):,} {m2_unit} = **{calc_contract_value(stats['p2_start'], sym2):,.0f}**
+                - {stats['base_s2']} 口基本保證金 = {calc_contract_value(stats['p2_start'], sym2):,.0f} × {MARGIN_RATE*100:.1f}% × {stats['base_s2']} = **{stats['margin_s2']/max(1, stats['multiplier']):,.0f}**
                 """)
             st.markdown(f"*(註：上述為回測期初起算時之一倍基本組合。實單會隨著帳戶總資金動態擴大倍數)*")
 
