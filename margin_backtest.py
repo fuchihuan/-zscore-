@@ -55,18 +55,11 @@ def calc_trading_cost(price, contracts):
     return tax + commission
 
 
-def find_min_contracts(hedge_ratio):
-    """
-    根據 Hedge Ratio 計算最少需下幾口才能配對。
-    
-    Hedge Ratio ≈ 0.96 表示:
-    每做 1 口 6414 (S2), 需要 0.96 口 1513 (S1) 來對沖。
-    
-    我們需要找到最小的整數口數組合:
-    contracts_S1 / contracts_S2 ≈ hedge_ratio
-    
-    注意：Hedge Ratio 是「價格」層面的，但由於兩檔都是1口=2000股，
 def find_min_contracts(price_s1, price_s2):
+    """
+    根據標的價格計算最少需下幾口才能對沖。
+    contracts_S1 / contracts_S2 ≈ price_s2 / price_s1
+    """
     target_ratio = price_s2 / price_s1
     best_score = float('inf')
     best_s1, best_s2 = 1, 1

@@ -310,7 +310,7 @@ def get_stored_5m_data(limit: int = 300) -> pd.DataFrame:
     if df_1m.empty:
         return pd.DataFrame()
     df_1m = df_1m.set_index('timestamp')
-    df_5m = df_1m.resample('5min').agg({
+    df_5m = df_1m.resample('5min', label='right', closed='right').agg({
         'wti_close': 'last',
         'brent_close': 'last',
         'spread': 'last',

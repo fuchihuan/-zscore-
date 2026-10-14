@@ -257,6 +257,82 @@ def render_co_movement_banner_html(prof1, prof2, price_corr=None, ret_corr=None,
         f'</div>'
     )
 
+def update_watchlist_with_live_prices(df_data, prices_df):
+    """
+    使用最新的價格資料庫 (prices_df) 動態更新每組配對的當前最新價格、價差與 Z-Score。
+    """
+    if prices_df is None or prices_df.empty or df_data is None or df_data.empty:
+        return df_data, None
+
+    updated_df = df_data.copy()
+    latest_date_str = str(prices_df.index[-1])[:10] if hasattr(prices_df.index, 'strftime') else str(prices_df.index[-1])
+    
+    # 遍歷每組配對更新
+    for idx, row in updated_df.iterrows():
+        s1_tk = str(row['Ticker1'])
+        s2_tk = str(row['Ticker2'])
+        w = int(row.get('Window', 20))
+        
+        if s1_tk in prices_df.columns and s2_tk in prices_df.columns:
+            s1 = prices_df[s1_tk].dropna()
+            s2 = prices_df[s2_tk].dropna()
+            common = s1.index.intersection(s2.index)
+            if len(common) >= w:
+                s1_sub = s1.loc[common]
+                s2_sub = s2.loc[common]
+                p1_latest = float(s1_sub.iloc[-1])
+                p2_latest = float(s2_sub.iloc[-1])
+                
+                hr = float(row.get('HedgeRatio', 1.0))
+                if hr == 0.0 or pd.isna(hr):
+                    X = sm.add_constant(s1_sub)
+                    ols_fit = sm.OLS(s2_sub, X).fit()
+                    hr = float(ols_fit.params.iloc[1])
+                
+                spread = s2_sub - hr * s1_sub
+                spread_mean = spread.rolling(window=w).mean()
+                spread_std = spread.rolling(window=w).std()
+                
+                lat_spread = float(spread.iloc[-1])
+                lat_mean = float(spread_mean.iloc[-1])
+                lat_std = float(spread_std.iloc[-1]) if pd.notna(spread_std.iloc[-1]) else 0.0
+                
+                cur_z = (lat_spread - lat_mean) / lat_std if lat_std > 1e-6 else 0.0
+                
+                # 更新數值
+                updated_df.at[idx, 'LatestPrice1'] = p1_latest
+                updated_df.at[idx, 'LatestPrice2'] = p2_latest
+                updated_df.at[idx, 'CurrentSpread'] = round(lat_spread, 2)
+                updated_df.at[idx, 'SpreadMean'] = round(lat_mean, 2)
+                updated_df.at[idx, 'SpreadStd'] = round(lat_std, 2)
+                updated_df.at[idx, 'CurrentZScore'] = round(cur_z, 2)
+                
+                # 操作建議
+                if cur_z >= 2.0:
+                    action = '🔥 放空價差收斂 (賣B買A)'
+                    room = lat_spread - lat_mean
+                    target_tp = f"價差回歸至 {lat_mean:.2f} (Z=0, 空間 +{room:.2f} 點)"
+                elif cur_z <= -2.0:
+                    action = '🔥 做多價差收斂 (買B賣A)'
+                    room = lat_mean - lat_spread
+                    target_tp = f"價差回歸至 {lat_mean:.2f} (Z=0, 空間 +{room:.2f} 點)"
+                elif cur_z >= 1.2:
+                    action = '⏳ 價差偏高 (接近進場門檻)'
+                    room = lat_spread - lat_mean
+                    target_tp = f"目標中樞 {lat_mean:.2f} (目前偏離 +{room:.2f} 點)"
+                elif cur_z <= -1.2:
+                    action = '⏳ 價差偏低 (接近進場門檻)'
+                    room = lat_mean - lat_spread
+                    target_tp = f"目標中樞 {lat_mean:.2f} (目前偏離 -{room:.2f} 點)"
+                else:
+                    action = '🎯 常態區間 (Z接近0)'
+                    target_tp = f"常態中樞 {lat_mean:.2f} (Z={cur_z:.2f})"
+                    
+                updated_df.at[idx, 'ActionRecommendation'] = action
+                updated_df.at[idx, 'TakeProfitTarget'] = target_tp
+
+    return updated_df, latest_date_str
+
 def render_watchlist_page(prices_df=None):
     """渲染今日精選收斂配對監控頁面 (100% 仿照回測樣式架構，2020年至今)"""
     # 1. Main Header (回測旗艦樣式)
@@ -268,34 +344,7 @@ def render_watchlist_page(prices_df=None):
         unsafe_allow_html=True
     )
 
-    df_data = load_convergence_data()
-    industry_df = load_industry_lookup()
-    
-    if df_data is None or df_data.empty:
-        st.warning("⚠️ 目前正在計算或尚未載入收斂配對主資料庫，請稍候片刻或點擊下方按鈕重新讀取！")
-        if st.button("🔄 重新載入最新資料庫"):
-            st.rerun()
-        return
-
-    # 2. 頂部 4 大回測風格 Metric Cards
-    total_pairs = len(df_data)
-    actionable_today = df_data[df_data['CurrentZScore'].abs() >= 2.0]
-    avg_winrate = df_data['WinRate'].mean()
-    avg_conv_days = df_data['AvgConvergenceDays'].mean()
-
-    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    with col_m1:
-        st.markdown(render_metric_card("精選高獲利配對池 (PF > 2.0)", f"{total_pairs} 組"), unsafe_allow_html=True)
-    with col_m2:
-        st.markdown(render_metric_card("今日進場訊號觸發 (|Z| ≥ 2.0)", f"{len(actionable_today)} 組可立即做", "positive"), unsafe_allow_html=True)
-    with col_m3:
-        st.markdown(render_metric_card("配對池平均歷史勝率", f"{avg_winrate:.1f}%", "positive"), unsafe_allow_html=True)
-    with col_m4:
-        st.markdown(render_metric_card("平均收斂週期", f"{avg_conv_days:.1f} 天"), unsafe_allow_html=True)
-
-    st.markdown("<div style='margin-bottom: 1.5rem;'></div>", unsafe_allow_html=True)
-
-    # 2.5 資料庫來源切換
+    # 1.5 資料庫來源切換
     c_p1, c_p2 = st.columns([3, 1])
     with c_p1:
         pool_mode = st.radio(
@@ -316,6 +365,39 @@ def render_watchlist_page(prices_df=None):
         df_data = pd.read_csv(target_path)
     except Exception:
         df_data = load_convergence_data()
+
+    if df_data is None or df_data.empty:
+        st.warning("⚠️ 目前正在計算或尚未載入收斂配對主資料庫，請稍候片刻或點擊下方按鈕重新讀取！")
+        if st.button("🔄 重新載入最新資料庫", key="retry_load_data"):
+            st.rerun()
+        return
+
+    # 若傳入 prices_df，自動進行動態最新報價與 Z-Score 更新
+    live_date_label = None
+    if prices_df is not None and not prices_df.empty:
+        df_data, live_date_label = update_watchlist_with_live_prices(df_data, prices_df)
+        if live_date_label:
+            st.info(f"⚡ 即時監控已同步：已使用最新市場行情資料（基準日：{live_date_label}）動態更新 Z 分數、價差與進出場指示。")
+
+    industry_df = load_industry_lookup()
+
+    # 2. 頂部 4 大回測風格 Metric Cards
+    total_pairs = len(df_data)
+    actionable_today = df_data[df_data['CurrentZScore'].abs() >= 2.0]
+    avg_winrate = df_data['WinRate'].mean()
+    avg_conv_days = df_data['AvgConvergenceDays'].mean()
+
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    with col_m1:
+        st.markdown(render_metric_card("精選高獲利配對池 (PF > 2.0)", f"{total_pairs} 組"), unsafe_allow_html=True)
+    with col_m2:
+        st.markdown(render_metric_card("今日進場訊號觸發 (|Z| ≥ 2.0)", f"{len(actionable_today)} 組可立即做", "positive"), unsafe_allow_html=True)
+    with col_m3:
+        st.markdown(render_metric_card("配對池平均歷史勝率", f"{avg_winrate:.1f}%", "positive"), unsafe_allow_html=True)
+    with col_m4:
+        st.markdown(render_metric_card("平均收斂週期", f"{avg_conv_days:.1f} 天"), unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-bottom: 1.5rem;'></div>", unsafe_allow_html=True)
 
     # 3. 條件篩選與排序控制列
     st.markdown("## 🎛️ 條件篩選與標的挑選")
@@ -719,6 +801,7 @@ def render_watchlist_page(prices_df=None):
             st.markdown(f"### (3) 💰 {name1} vs {name2} 歷史回測累計報酬曲線 (2020年1月1日至今)")
             fig_eq = go.Figure()
             has_eq_data = False
+            cum_pnl = None
             if df_rec is not None and not df_rec.empty:
                 if '帳戶淨值' in df_rec.columns:
                     cum_pnl = df_rec['帳戶淨值'] - 1000000
@@ -773,6 +856,27 @@ def render_watchlist_page(prices_df=None):
             st.plotly_chart(fig_eq, use_container_width=True)
 
             # (區塊 4) 歷史收斂交易明細全記錄 (2020年1月1日至今，全部展示，不截斷)
+            if stats and stats.get('active_position'):
+                act = stats['active_position']
+                pnl = act['unrealized_pnl']
+                pnl_color = "#ff6b6b" if pnl < 0 else "#64ffda"
+                dir_desc = f"做空 {name1} {act['c1']}口 / 做多 {name2} {act['c2']}口" if act['direction'] == 1 else f"做多 {name1} {act['c1']}口 / 做空 {name2} {act['c2']}口"
+                st.markdown(
+                    f'<div style="background: rgba(255, 171, 0, 0.12); border: 1px solid rgba(255, 171, 0, 0.4); border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 1.2rem;">'
+                    f'<div style="font-weight: 700; font-size: 1.05rem; color: #ffb74d; margin-bottom: 0.5rem;">'
+                    f'⏳ 提示：目前尚有 1 筆持倉中部位尚未平倉（已即時反映於上方累計報酬曲線，平倉後將計入下方歷史明細）'
+                    f'</div>'
+                    f'<div style="display: flex; flex-wrap: wrap; gap: 1.5rem; font-size: 0.9rem; line-height: 1.6;">'
+                    f'<div>📅 <b>進場日期：</b>{act["entry_date"]} (持有 {act["days_held"]} 個交易日)</div>'
+                    f'<div>⚖️ <b>持倉方向：</b>{dir_desc}</div>'
+                    f'<div>🎯 <b>開倉時 Z 分數：</b>{act["entry_zscore"]} ｜ <b>當前 Z 分數：</b>{act["current_zscore"]}</div>'
+                    f'<div>💲 <b>進場價格：</b>{name1} {act["entry_p1"]:.1f} / {name2} {act["entry_p2"]:.1f}</div>'
+                    f'<div>📌 <b>最新價格：</b>{name1} {act["current_p1"]:.1f} / {name2} {act["current_p2"]:.1f}</div>'
+                    f'<div>📈 <b>未實現浮動損益：</b><span style="color: {pnl_color}; font-weight: 700; font-size: 1.1rem;">{pnl:+,.0f} 元</span></div>'
+                    f'</div></div>',
+                    unsafe_allow_html=True
+                )
+
             if df_trades is not None and not df_trades.empty:
                 st.markdown(f"### (4) 📝 歷史收斂交易明細全記錄 (2020年1月1日至今，共 {len(df_trades)} 筆交易，完整展示)")
                 

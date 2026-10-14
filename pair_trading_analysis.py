@@ -15,7 +15,7 @@ def main():
     
     # Drop columns that have too many NaNs
     df = df.dropna(axis=1, thresh=len(df)*0.8)
-    df = df.ffill().bfill() # fill remaining gaps
+    df = df.ffill() # forward fill gaps
     
     symbols = df.columns.tolist()
     print(f"Loaded {len(symbols)} valid ticker data for analysis.", flush=True)

@@ -23,11 +23,17 @@ def detect_limit_days(series):
     limit_down = pct <= -(LIMIT_PCT - 0.001)
     return limit_up | limit_down
 
-def calc_contract_value(price):
-    return price * SHARES_PER_CONTRACT
+def get_shares_per_contract(sym=None):
+    """台股股票期貨契約乘數：一般 1 口 = 2,000 股；小型股票期貨 1 口 = 100 股"""
+    if sym and ('mini' in str(sym).lower() or '小型' in str(sym) or 'qff' in str(sym).lower()):
+        return 100
+    return SHARES_PER_CONTRACT
 
-def calc_margin_per_contract(price):
-    return calc_contract_value(price) * MARGIN_RATE
+def calc_contract_value(price, sym=None):
+    return price * get_shares_per_contract(sym)
+
+def calc_margin_per_contract(price, sym=None, margin_rate=MARGIN_RATE):
+    return calc_contract_value(price, sym) * margin_rate
 
 def get_tick_size(price):
     """台股與個股期貨最小升降單位 (Tick Size)"""
@@ -433,6 +439,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                     state['entry_p1'], state['entry_p2'] = p1, p2
                     state['entry_zscore'] = z
                     state['entry_date'] = date
+                    state['unrealized_pnl'] = 0.0
                     if not state.get('cycle_start_date'):
                         state['cycle_start_date'] = date
                     cost = calc_leg_costs(p1, dyn_c1, p2, dyn_c2, is_settle=False)
@@ -460,6 +467,8 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                         '動作': '結算平倉',
                         '損益': round(net_pnl, 0)
                     })
+                    state['is_active'] = False
+                    state['unrealized_pnl'] = 0.0
                     
                     trade_mode = advanced_params.get('trade_mode', '收斂 (均值回歸)')
                     if use_grid:
@@ -522,6 +531,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                             '持有天數': c_days
                         })
                         state['is_active'] = False
+                        state['unrealized_pnl'] = 0.0
                         state['cycle_start_date'] = None
 
         for state in grid_states:
@@ -564,6 +574,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                         state['entry_zscore'] = z
                         state['entry_date'] = date
                         state['cycle_start_date'] = date
+                        state['unrealized_pnl'] = 0.0
                         cost = calc_leg_costs(p1, dyn_c1, p2, dyn_c2, is_settle=False)
                         cash -= cost
                         realized_pnl_total -= cost
@@ -672,5 +683,28 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     stats['stop_loss_count'] = stop_loss_count
     stats['slippage_ticks'] = slippage_ticks
     stats['stop_loss_z'] = stop_loss_z if enable_stop_loss else None
+
+    active_states = [s for s in grid_states if s['is_active']]
+    if active_states:
+        last_s = active_states[0]
+        entry_d = last_s['entry_date']
+        days_held = len(zscore.loc[entry_d:]) if entry_d in zscore.index else 1
+        stats['active_position'] = {
+            'is_active': True,
+            'direction': last_s['direction'],
+            'entry_date': entry_d.strftime('%Y-%m-%d') if hasattr(entry_d, 'strftime') else str(entry_d),
+            'c1': last_s['c1'],
+            'c2': last_s['c2'],
+            'entry_p1': last_s['entry_p1'],
+            'entry_p2': last_s['entry_p2'],
+            'current_p1': float(S1.iloc[-1]),
+            'current_p2': float(S2.iloc[-1]),
+            'unrealized_pnl': round(last_s.get('unrealized_pnl', 0.0), 0),
+            'entry_zscore': round(last_s.get('entry_zscore', 0.0), 2),
+            'current_zscore': round(float(zscore.iloc[-1]), 2),
+            'days_held': days_held
+        }
+    else:
+        stats['active_position'] = None
 
     return df_records, df_trades, stats

@@ -15,7 +15,9 @@ def get_zscore_signals(S1, S2, z_entry, z_exit, window):
     spread_mean = spread.rolling(window=window).mean()
     spread_std = spread.rolling(window=window).std()
     
-    zscore = (spread - spread_mean) / spread_std
+    safe_std = spread_std.replace(0, np.nan)
+    zscore = (spread - spread_mean) / safe_std
+    zscore = zscore.fillna(0.0)
     
     # 返回 DataFrame
     df = pd.DataFrame({

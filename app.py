@@ -21,6 +21,7 @@ import os
 import json
 import yfinance as yf
 import datetime
+import calendar
 import importlib
 import touchance_service as ts
 importlib.reload(ts)
@@ -324,7 +325,9 @@ def load_price_data():
         tw_last_date = df.index[-1]
         
     today = datetime.datetime.now()
-    if tw_last_date.date() < today.date() - datetime.timedelta(days=1):
+    # 只要最新日期小於今天（且若為當天則於 14:00 收盤後嘗試更新最新盤後價），即進行增量更新
+    should_update_tw = (tw_last_date.date() < today.date() - datetime.timedelta(days=1)) or (tw_last_date.date() < today.date() and today.hour >= 14)
+    if should_update_tw:
         try:
             start_str = (tw_last_date + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
             if tw_cols:
@@ -360,13 +363,14 @@ def load_price_data():
     }
     try:
         existing_global = [tk for tk in global_symbols.keys() if tk in df.columns]
+        global_last_date = None
         if existing_global:
             global_last_date = df[existing_global].dropna(how='all').index[-1]
             g_start_str = global_last_date.strftime('%Y-%m-%d')
         else:
             g_start_str = '2020-01-01'
             
-        if not existing_global or global_last_date.date() < today.date() - datetime.timedelta(days=1):
+        if not existing_global or (global_last_date is not None and global_last_date.date() < today.date() - datetime.timedelta(days=1)):
             global_data = yf.download(
                 list(global_symbols.keys()),
                 start=g_start_str,
@@ -413,7 +417,7 @@ def load_price_data():
     except Exception as e:
         print(f"Error fetching global data: {e}")
 
-    df = df.ffill().bfill()
+    df = df.ffill()
     if dirty:
         try:
             df.to_csv(DATA_FILE)
@@ -1028,7 +1032,6 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
     # 預先計算進階濾波 Mask
     zscore = signal_df['Indicator']
     spread = signal_df['Spread']
-    import numpy as np
     hedge_ratio_series = pd.Series(signal_df['Hedge_Ratio'], index=zscore.index) if isinstance(signal_df.get('Hedge_Ratio'), (int, float, np.float64, np.float32)) else signal_df.get('Hedge_Ratio', pd.Series(1.0, index=zscore.index))
     
     ou_pass_mask = pd.Series(True, index=zscore.index)
@@ -1262,6 +1265,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                     state['entry_p1'], state['entry_p2'] = p1, p2
                     state['entry_zscore'] = z
                     state['entry_date'] = date
+                    state['unrealized_pnl'] = 0.0
                     
                     cost, slip, feetax = calc_leg_costs(p1, dyn_c1, p2, dyn_c2, is_settle=False)
                     cash -= cost
@@ -1342,6 +1346,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                         state['pending_reopen_dir'] = pos
                         
                     state['is_active'] = False
+                    state['unrealized_pnl'] = 0.0
                     state['is_stopped_out'] = False
         else:
             # 4. 正常平倉 (TP) / 停損平倉 (SL)
@@ -1405,6 +1410,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                                 '損益': round(net_pnl, 0)
                             })
                             state['is_active'] = False
+                            state['unrealized_pnl'] = 0.0
             
             # 5. 解除停損冷卻 (Re-entry)
             for state in grid_states:
@@ -1453,6 +1459,7 @@ def run_backtest(S1, S2, sym1, sym2, name1, name2, initial_capital,
                             state['entry_p1'], state['entry_p2'] = p1, p2
                             state['entry_zscore'] = z
                             state['entry_date'] = date
+                            state['unrealized_pnl'] = 0.0
                             
                             cost, slip, feetax = calc_leg_costs(p1, dyn_c1, p2, dyn_c2, is_settle=False)
                             cash -= cost
@@ -2015,6 +2022,9 @@ def main():
             # 尋找該細產業內的獲利因子 > 3.0 推薦配對
             sub_high_pf = high_pf_df[high_pf_df['SubIndustry'] == selected_sub] if high_pf_df is not None and not high_pf_df.empty else pd.DataFrame()
             chosen_hp = None
+            hp_labels = []
+            default_s1 = 0
+            default_s2 = 1 if len(sub_tickers) > 1 else 0
             if not sub_high_pf.empty:
                 hp_labels = ["-- 手動挑選下方標的 --"] + [
                     f"🔥 {r['Name1']} vs {r['Name2']} ｜ PF {r['ProfitFactor']:.2f} ｜ 勝率 {r['WinRate']:.1f}% ｜ 報酬 {r['TotalReturnPct']:+.1f}%"
@@ -2028,7 +2038,7 @@ def main():
                     default_s2 = sub_tickers.index(target_row['Ticker2']) if target_row['Ticker2'] in sub_tickers else (1 if len(sub_tickers) > 1 else 0)
 
             # 尋找該細產業內的推薦配對 (來自 pre-computed 協整資料)
-            if not chosen_hp or chosen_hp == hp_labels[0]:
+            if not chosen_hp or not hp_labels or chosen_hp == hp_labels[0]:
                 rec_pairs_for_sub = [
                     p for p in sub_pairs 
                     if p.get('SubIndustry') == selected_sub and p.get('Ticker1') in sub_tickers and p.get('Ticker2') in sub_tickers
@@ -2087,14 +2097,15 @@ def main():
             # 回調函式：當從精選推薦點選一鍵帶入時，自動更新標的 A / B
             def _apply_pf_preset():
                 chosen = st.session_state.get('preset_pf')
-                if chosen and chosen != pf_labels[0]:
+                if chosen and chosen != pf_labels[0] and high_pf_df is not None and not high_pf_df.empty:
                     idx = pf_labels.index(chosen) - 1
-                    row = high_pf_df.iloc[idx]
-                    t1, t2 = row['Ticker1'], row['Ticker2']
-                    if t1 in sorted_all_tickers:
-                        st.session_state['sym1_all'] = t1
-                    if t2 in sorted_all_tickers:
-                        st.session_state['sym2_all'] = t2
+                    if 0 <= idx < len(high_pf_df):
+                        row = high_pf_df.iloc[idx]
+                        t1, t2 = row['Ticker1'], row['Ticker2']
+                        if t1 in sorted_all_tickers:
+                            st.session_state['sym1_all'] = t1
+                        if t2 in sorted_all_tickers:
+                            st.session_state['sym2_all'] = t2
 
             def _apply_coint_preset():
                 chosen = st.session_state.get('preset_coint')

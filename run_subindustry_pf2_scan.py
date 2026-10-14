@@ -31,7 +31,7 @@ def run_pair_task(task):
     global _prices, _ind_df
     sub, sym1, sym2, window = task
     
-    if _prices is None or sym1 not in _prices.columns or sym2 not in _prices.columns:
+    if _prices is None or _ind_df is None or sym1 not in _prices.columns or sym2 not in _prices.columns:
         return None
         
     s1 = _prices[sym1].dropna()
