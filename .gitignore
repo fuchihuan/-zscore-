@@ -1,4 +1,4 @@
-﻿# Byte-compiled / optimized / DLL files
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *.class
@@ -20,7 +20,10 @@ venv/
 .serena/
 scratch/
 temp_models.txt
+temp_conv.txt
 -zscore--main/
+Non_Elec_10_Traditional_Updated/
+Portfolio_10_Specific_Pairs_Updated/
 
 # OS & Misc
 .DS_Store

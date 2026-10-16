@@ -27,6 +27,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import statsmodels.api as sm
 import pure_backtest
+import taifex_live
 
 CSV_DEDUP_PATH = 'subindustry_pf2_convergence_dedup.csv'
 CSV_MASTER_PATH = 'subindustry_pf2_convergence_master.csv'
@@ -333,6 +334,310 @@ def update_watchlist_with_live_prices(df_data, prices_df):
 
     return updated_df, latest_date_str
 
+@st.cache_data(ttl=3, show_spinner=False)
+def _cached_taifex_quotes():
+    return taifex_live.fetch_taifex_stock_quotes()
+
+
+def render_signal_card(r):
+    """
+    使用純原生 Streamlit 卡片 (st.container, st.metric, st.success, st.warning)，
+    徹底杜絕 HTML 縮排被 Markdown 解析器誤判為程式碼區塊 (<pre><code>) 的問題，
+    呈現完全無代碼框、字體超清晰、主題適配的高階視覺化實單指引。
+    """
+    sig = str(r["Signal"])
+    is_open = sig.startswith("🔥")
+    is_close = sig.startswith("✅")
+    n1, n2 = r["Name1"], r["Name2"]
+    sym1, sym2 = taifex_live._code(r["Ticker1"]), taifex_live._code(r["Ticker2"])
+    c1, c2 = int(r.get("C1", 1)), int(r.get("C2", 1))
+    margin_w = (r.get("RealMargin") or 0.0) / 10000.0
+    val1_w = float(r.get("Val1W") or (r['ExitP1'] * c1 * 2000 / 10000.0))
+    val2_w = float(r.get("Val2W") or (r['ExitP2'] * c2 * 2000 / 10000.0))
+    val_diff = float(r.get("ValDiffPct") or 0.0)
+
+    with st.container(border=True):
+        st.markdown(f"#### {sig} ｜ **{n1} ({sym1}) vs {n2} ({sym2})**")
+        st.caption(
+            f"細產業：**{r['SubIndustry']}** ｜ 窗口：**{r['Window']}日** ｜ "
+            f"最小配置：**{n1}×{c1}口 ({val1_w:.1f}萬) : {n2}×{c2}口 ({val2_w:.1f}萬)** ｜ "
+            f"原始保證金：約 **{margin_w:.1f} 萬** ｜ 報價時間：{r.get('QuoteTime', '')}"
+        )
+
+        if is_close:
+            pnl = r.get("TotalPnL") or 0.0
+            pnl_pct = r.get("PnLPct") or 0.0
+            pnl_a = r.get("PnLA") or 0.0
+            pnl_b = r.get("PnLB") or 0.0
+            c_m1, c_m2, c_m3, c_m4 = st.columns(4)
+            with c_m1:
+                st.metric(
+                    label=f"📌 歷史開倉價 ({r.get('EntryDate', '前日')})",
+                    value=f"{r['EntryP1']:.2f} / {r['EntryP2']:.2f}",
+                    delta=f"開倉價差 {r.get('EntrySpread', 0):.2f} (Z={r.get('EntryZ', 0):+.2f})"
+                )
+            with c_m2:
+                st.metric(
+                    label="🏁 今日即時平倉價",
+                    value=f"{r['ExitP1']:.2f} / {r['ExitP2']:.2f}",
+                    delta=f"即時價差 {r['LiveSpread']:.2f} (Z={r['LiveZ']:+.2f})"
+                )
+            with c_m3:
+                st.metric(
+                    label="💰 1組平倉總損益",
+                    value=f"{pnl:+,.0f} 元",
+                    delta=f"報酬率 {pnl_pct:+.2f}%"
+                )
+            with c_m4:
+                st.metric(
+                    label=f"各腿損益 ({n1} : {n2})",
+                    value=f"{pnl_a:+,.0f} / {pnl_b:+,.0f}"
+                )
+            st.success(f"🎯 **操作指示**：價差已回歸停利中樞 (Z 回到 0)，建議實單以即時價 **{n1}: {r['ExitP1']:.2f} / {n2}: {r['ExitP2']:.2f}**，將 **{n1}×{c1}口 與 {n2}×{c2}口** 全數平倉停利出場！")
+
+        elif is_open:
+            exp_pnl = r.get("ExpPnL") or 0.0
+            exp_roi = r.get("ExpROI") or 0.0
+            exp_room = r.get("ExpRoom") or 0.0
+            action_text = sig.split("：")[-1] if "：" in sig else sig
+            c_m1, c_m2, c_m3, c_m4 = st.columns(4)
+            with c_m1:
+                st.metric(
+                    label="🎯 建議開倉價 (A / B)",
+                    value=f"{r['ExitP1']:.2f} / {r['ExitP2']:.2f}",
+                    delta=f"即時價差 {r['LiveSpread']:.2f}"
+                )
+            with c_m2:
+                st.metric(
+                    label="🎯 目標停利中樞 (Z=0)",
+                    value=f"{r['LiveMean']:.2f}",
+                    delta=f"預期收斂空間 +{exp_room:.2f} 點"
+                )
+            with c_m3:
+                st.metric(
+                    label="🚀 預估 1 組收斂獲利",
+                    value=f"+{exp_pnl:,.0f} 元",
+                    delta=f"預估報酬率 +{exp_roi:.1f}%"
+                )
+            with c_m4:
+                st.metric(
+                    label="即時 Z 分數偏離",
+                    value=f"{r['LiveZ']:+.2f}",
+                    delta=f"前收基準 Z: {r['PrevZ']:+.2f}"
+                )
+            st.warning(f"⚡ **實單下單動作**：**{action_text}** ｜ 下單配置：**{n1}×{c1}口 ＋ {n2}×{c2}口**（市值：**{val1_w:.1f}萬 vs {val2_w:.1f}萬**）｜ 原始保證金需求約 **{margin_w:.1f} 萬**。")
+
+        else:
+            pnl = r.get("TotalPnL") or 0.0
+            pnl_pct = r.get("PnLPct") or 0.0
+            pnl_a = r.get("PnLA") or 0.0
+            pnl_b = r.get("PnLB") or 0.0
+            c_m1, c_m2, c_m3, c_m4 = st.columns(4)
+            with c_m1:
+                st.metric(
+                    label=f"📌 歷史開倉價 ({r.get('EntryDate', '')})",
+                    value=f"{r['EntryP1']:.2f} / {r['EntryP2']:.2f}"
+                )
+            with c_m2:
+                st.metric(
+                    label="🏁 今日即時價",
+                    value=f"{r['ExitP1']:.2f} / {r['ExitP2']:.2f}",
+                    delta=f"即時Z {r['LiveZ']:+.2f}"
+                )
+            with c_m3:
+                st.metric(
+                    label="💰 1組未實現損益",
+                    value=f"{pnl:+,.0f} 元",
+                    delta=f"{pnl_pct:+.2f}%"
+                )
+            with c_m4:
+                st.metric(
+                    label=f"各腿損益 ({n1} : {n2})",
+                    value=f"{pnl_a:+,.0f} / {pnl_b:+,.0f}"
+                )
+            st.info(f"⏳ **持倉中**：目前價差 {r['LiveSpread']:.2f}，距離目標停利中樞 {r['LiveMean']:.2f} (Z=0) 尚有 {r['ExpRoom']:.2f} 點空間。")
+
+
+
+def _style_live_board(view_df):
+    """即時排行榜配色：文字深飽和高對比，避免淺色主題下模糊不清"""
+    def z_color(v):
+        try:
+            z = float(v)
+        except (TypeError, ValueError):
+            return ""
+        if abs(z) < 1.0:
+            return ""
+        # 柔和背景色搭配清晰深色文字
+        if z > 0:
+            return "background-color: #fee2e2; color: #991b1b; font-weight: 700;"
+        else:
+            return "background-color: #dcfce7; color: #166534; font-weight: 700;"
+
+    def sig_color(v):
+        s = str(v)
+        if s.startswith("🔥"):
+            return "background-color: #ffedd5; color: #9a3412; font-weight: 800;"
+        if s.startswith("✅"):
+            return "background-color: #d1fae5; color: #065f46; font-weight: 800;"
+        if s.startswith("📌"):
+            return "background-color: #e0f2fe; color: #0369a1; font-weight: 700;"
+        if s.startswith("⏳"):
+            return "background-color: #fef9c3; color: #854d0e; font-weight: 700;"
+        return ""
+
+    def pnl_color(v):
+        s = str(v)
+        if "預估" in s or "預期" in s:
+            return "color: #0284c7; font-weight: 800;"
+        if s.startswith("+"):
+            return "color: #16a34a; font-weight: 800;"
+        if s.startswith("-"):
+            return "color: #dc2626; font-weight: 800;"
+        return ""
+
+    styler = view_df.style
+    styler = styler.map(z_color, subset=["即時Z", "前收Z"]) if hasattr(styler, "map") else styler.applymap(z_color, subset=["即時Z", "前收Z"])
+    styler = styler.map(sig_color, subset=["盤中訊號"]) if hasattr(styler, "map") else styler.applymap(sig_color, subset=["盤中訊號"])
+    styler = styler.map(pnl_color, subset=["1組損益(元)", "損益率%"]) if hasattr(styler, "map") else styler.applymap(pnl_color, subset=["1組損益(元)", "損益率%"])
+    return styler
+
+
+def render_live_board(df_data, prices_df):
+    """⚡ 盤中即時 Z 分數排行榜 (期交所 MIS 即時報價)"""
+    st.markdown("## ⚡ 盤中即時 Z 分數排行榜（期交所即時報價）")
+    if prices_df is None or prices_df.empty:
+        st.warning("缺少歷史收盤價資料，無法計算即時 Z 分數。")
+        return
+
+    c1, c2, c3, c4 = st.columns([1.4, 1.4, 1.2, 1.6])
+    with c1:
+        basis = st.radio("Z 分數計價基準", ["現貨即時價 (與回測一致)", "近月股期即時價"], index=0, horizontal=True, key="live_basis")
+    with c2:
+        refresh_label = st.radio("自動更新頻率", ["5 秒", "10 秒", "30 秒", "暫停"], index=1, horizontal=True, key="live_refresh")
+    with c3:
+        z_entry = st.number_input("開倉門檻 |Z| ≥", value=2.0, step=0.1, min_value=0.5, key="live_z_entry")
+    with c4:
+        only_signal = st.checkbox("只顯示達開倉 / 平倉門檻的組合", value=False, key="live_only_signal")
+
+    baselines = taifex_live.prepare_pair_baselines(df_data, prices_df, z_entry=z_entry, z_exit=0.0)
+    if not baselines:
+        st.warning("配對池內的標的在歷史價格資料中找不到，無法建立盤前基準。")
+        return
+
+    price_basis = "fut" if "期" in basis else "spot"
+    run_every = {"5 秒": 5, "10 秒": 10, "30 秒": 30}.get(refresh_label)
+
+    @st.fragment(run_every=run_every)
+    def _live_fragment():
+        try:
+            quotes = _cached_taifex_quotes()
+            err = None
+        except Exception as e:
+            quotes, err = {}, str(e)
+
+        board = taifex_live.compute_live_board(baselines, quotes, price_basis=price_basis, z_entry=z_entry, z_exit=0.0)
+        if board.empty:
+            st.info("目前沒有可計算的配對。")
+            return
+
+        n_live = int(board["LiveOK"].sum())
+        prev_date = board["PrevDate"].iloc[0]
+        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        if err:
+            st.error(f"❌ 期交所即時報價連線失敗：{err}（以下暫以 {prev_date} 收盤價計算）")
+        elif n_live == 0:
+            st.warning(f"⏸️ 尚未取得今日成交價（盤前或休市），以下為 {prev_date} 收盤價計算之 Z 分數。更新時間 {now_str}")
+        else:
+            st.success(f"🟢 期交所即時報價已連線：{n_live}/{len(board)} 組已用即時價更新 ｜ 前收基準日 {prev_date} ｜ 更新時間 {now_str}")
+
+        open_sig = board[board["Signal"].str.startswith("🔥")]
+        close_sig = board[board["Signal"].str.startswith("✅")]
+        holding = board[board["Position"] != 0]
+        
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.markdown(render_metric_card("🔥 盤中達開倉門檻", f"{len(open_sig)} 組", "positive" if len(open_sig) else ""), unsafe_allow_html=True)
+        with m2:
+            st.markdown(render_metric_card("✅ 盤中達平倉門檻", f"{len(close_sig)} 組", "positive" if len(close_sig) else ""), unsafe_allow_html=True)
+        with m3:
+            st.markdown(render_metric_card("📌 回測規則持倉中", f"{len(holding)} 組"), unsafe_allow_html=True)
+        with m4:
+            top = board.iloc[0]
+            st.markdown(render_metric_card("最大偏離組合", f"{top['Name1']}/{top['Name2']} {top['LiveZ']:+.2f}"), unsafe_allow_html=True)
+
+        # 1. 達門檻通知卡片 (使用原生 Streamlit Metric 卡片，無任何代碼框與縮排問題)
+        triggered_df = pd.concat([open_sig, close_sig])
+        if not triggered_df.empty:
+            st.markdown("### 🔔 盤中即時觸發動作指示")
+            for _, r in triggered_df.iterrows():
+                render_signal_card(r)
+
+        # 2. 持倉中監控 Expander (讓投資人隨時查看目前持倉明細與未實現損益)
+        if not holding.empty:
+            with st.expander(f"📌 查看回測持倉中之配對明細與未實現損益 (共 {len(holding)} 組)", expanded=False):
+                for _, r in holding.iterrows():
+                    render_signal_card(r)
+
+        show = board if not only_signal else board[board["Signal"].str.startswith(("🔥", "✅"))]
+        if show.empty:
+            st.info("目前沒有組合達到開倉或平倉門檻。")
+            return
+
+        def fmt(v, nd=2):
+            return f"{v:.{nd}f}" if v is not None and pd.notna(v) else "—"
+
+        def fmt_pnl(r):
+            if r.get("IsHolding") and r.get("TotalPnL") is not None:
+                return f"{r['TotalPnL']:+,.0f} 元"
+            elif str(r.get("Signal", "")).startswith("🔥") and r.get("ExpPnL") is not None:
+                return f"預估 +{r['ExpPnL']:,.0f} 元"
+            return "——"
+
+        def fmt_roi(r):
+            if r.get("IsHolding") and r.get("PnLPct") is not None:
+                return f"{r['PnLPct']:+.1f}%"
+            elif str(r.get("Signal", "")).startswith("🔥") and r.get("ExpROI") is not None:
+                return f"預期 +{r['ExpROI']:.1f}%"
+            return "——"
+
+        view = pd.DataFrame({
+            "排名": show["Rank"],
+            "盤中訊號": show["Signal"],
+            "配對 (A vs B)": [f"{a}({taifex_live._code(x)}) vs {b}({taifex_live._code(y)})" for a, x, b, y in zip(show["Name1"], show["Ticker1"], show["Name2"], show["Ticker2"])],
+            "細產業": show["SubIndustry"],
+            "窗口": show["Window"].astype(str) + "日",
+            "口數配置": [f"{r['Name1']}×{int(r['C1'])} ({r.get('Val1W', 0):.1f}萬) : {r['Name2']}×{int(r['C2'])} ({r.get('Val2W', 0):.1f}萬)" for _, r in show.iterrows()],
+            "開倉價A": [fmt(r["EntryP1"]) if r.get("EntryP1") is not None else "—" for _, r in show.iterrows()],
+            "開倉價B": [fmt(r["EntryP2"]) if r.get("EntryP2") is not None else "—" for _, r in show.iterrows()],
+            "即時價A": [fmt(v) for v in show["ExitP1"]],
+            "即時價B": [fmt(v) for v in show["ExitP2"]],
+            "1組損益(元)": [fmt_pnl(r) for _, r in show.iterrows()],
+            "損益率%": [fmt_roi(r) for _, r in show.iterrows()],
+            "即時價差": show["LiveSpread"].round(2),
+            "停利中樞(Z=0)": show["LiveMean"].round(2),
+            "即時Z": show["LiveZ"].round(2),
+            "前收Z": show["PrevZ"].round(2),
+            "ΔZ": show["DeltaZ"].round(2),
+            "保證金(萬)": (show["RealMargin"] / 10000.0).round(1),
+            "獲利因子": show["ProfitFactor"].round(2),
+            "勝率%": show["WinRate"].round(1),
+            "報價時間": show["QuoteTime"],
+        })
+        
+        st.dataframe(_style_live_board(view), use_container_width=True, hide_index=True, height=min(720, len(view) * 35 + 40))
+        st.caption(
+            "說明：\n"
+            "1. **最小口數配置**：以高價股固定 1 口為基準，低價股配最接近但不超過高價股總市值之口數（向下取整，價格小的總金額不超過價格大的），確保最小資金佔用；1 口股票期貨 = 2,000 股。\n"
+            "2. **開倉價格與損益**：若組合為回測規則持倉中，顯示該筆交易歷史開倉價與今日平倉/未實現累計損益；若為今日剛達開倉門檻之組合，顯示以現價建倉之建議進場價與預期收斂至中樞時之預估獲利金額。\n"
+            "3. **資料來源**：期交所 MIS 即時行情 (mis.taifex.com.tw) 自動高速串接。"
+        )
+
+
+    _live_fragment()
+    st.markdown("<div style='margin-bottom: 1.5rem;'></div>", unsafe_allow_html=True)
+
+
 def render_watchlist_page(prices_df=None):
     """渲染今日精選收斂配對監控頁面 (100% 仿照回測樣式架構，2020年至今)"""
     # 1. Main Header (回測旗艦樣式)
@@ -398,6 +703,9 @@ def render_watchlist_page(prices_df=None):
         st.markdown(render_metric_card("平均收斂週期", f"{avg_conv_days:.1f} 天"), unsafe_allow_html=True)
 
     st.markdown("<div style='margin-bottom: 1.5rem;'></div>", unsafe_allow_html=True)
+
+    # 2.5 盤中即時 Z 分數排行榜 (期交所 MIS 即時報價，全配對池依 |Z| 排名)
+    render_live_board(df_data, prices_df)
 
     # 3. 條件篩選與排序控制列
     st.markdown("## 🎛️ 條件篩選與標的挑選")
@@ -523,13 +831,15 @@ def render_watchlist_page(prices_df=None):
     p1_latest = float(selected_raw['LatestPrice1'])
     p2_latest = float(selected_raw['LatestPrice2'])
     contracts_str = str(selected_raw['BaseContracts'])
-    base_margin = float(selected_raw['BaseMargin'])
     sp_now = float(selected_raw['CurrentSpread'])
     sp_mean = float(selected_raw['SpreadMean'])
     sp_std = float(selected_raw['SpreadStd'])
 
-    c1_num = contracts_str.split(':')[0].strip() if ':' in contracts_str else '1'
-    c2_num = contracts_str.split(':')[1].strip() if ':' in contracts_str else '1'
+    # 依最新市價動態計算等合約總值最優口數與保證金
+    c1_dyn, c2_dyn = taifex_live.find_min_contracts(p1_latest, p2_latest)
+    c1_num = str(c1_dyn)
+    c2_num = str(c2_dyn)
+    base_margin = (p1_latest * c1_dyn + p2_latest * c2_dyn) * 2000 * 0.135
 
     prof1 = get_stock_profile(sym1, industry_df)
     prof2 = get_stock_profile(sym2, industry_df)
@@ -593,7 +903,7 @@ def render_watchlist_page(prices_df=None):
         st.markdown(render_metric_card("Hedge Ratio (β)", f"{hr:.4f}"), unsafe_allow_html=True)
 
     with col_p2:
-        st.markdown(render_metric_card("最小等張口數需求", f"{name1}×{c1_num} : {name2}×{c2_num}"), unsafe_allow_html=True)
+        st.markdown(render_metric_card("最小等值口數配置", f"{name1}×{c1_num} : {name2}×{c2_num}"), unsafe_allow_html=True)
 
     with col_p3:
         st.markdown(render_metric_card("最低一組基本保證金", f"{base_margin:,.0f} 元"), unsafe_allow_html=True)
@@ -606,22 +916,27 @@ def render_watchlist_page(prices_df=None):
     with st.expander("📐 詳細保證金計算與合約規格", expanded=False):
         calc_col1, calc_col2 = st.columns(2)
         m1_contract_val = p1_latest * 2000
-        m1_margin_req = m1_contract_val * 0.135 * int(c1_num)
+        val1_total = m1_contract_val * int(c1_num)
+        m1_margin_req = val1_total * 0.135
         m2_contract_val = p2_latest * 2000
-        m2_margin_req = m2_contract_val * 0.135 * int(c2_num)
+        val2_total = m2_contract_val * int(c2_num)
+        m2_margin_req = val2_total * 0.135
+        diff_pct = abs(val1_total - val2_total) / max(val1_total, val2_total) * 100 if max(val1_total, val2_total) > 0 else 0
         with calc_col1:
             st.markdown(f"""
             **Leg 1: {name1} ({sym1})** (現價: {p1_latest:.2f} 元)
             - 1 口合約價值 = {p1_latest:.2f} × 2,000 股 = **{m1_contract_val:,.0f} 元**
-            - {c1_num} 口基本保證金 = {m1_contract_val:,.0f} × 13.5% × {c1_num} = **{m1_margin_req:,.0f} 元**
+            - {c1_num} 口總市值 = **{val1_total:,.0f} 元**
+            - {c1_num} 口原始保證金 = {val1_total:,.0f} × 13.5% = **{m1_margin_req:,.0f} 元**
             """)
         with calc_col2:
             st.markdown(f"""
             **Leg 2: {name2} ({sym2})** (現價: {p2_latest:.2f} 元)
             - 1 口合約價值 = {p2_latest:.2f} × 2,000 股 = **{m2_contract_val:,.0f} 元**
-            - {c2_num} 口基本保證金 = {m2_contract_val:,.0f} × 13.5% × {c2_num} = **{m2_margin_req:,.0f} 元**
+            - {c2_num} 口總市值 = **{val2_total:,.0f} 元**
+            - {c2_num} 口原始保證金 = {val2_total:,.0f} × 13.5% = **{m2_margin_req:,.0f} 元**
             """)
-        st.caption("*(註：依台灣期交所標準規格：1口股票期貨 = 2,000股 (2張現股)，法定原始保證金為合約總值之 13.5%)*")
+        st.caption(f"*(註：依台灣期交所標準規格：1口股票期貨 = 2,000股。雙邊配置市值為 **{val1_total/10000:.1f}萬 vs {val2_total/10000:.1f}萬**，市值差距僅 **{diff_pct:.1f}%**，達到等金額 Dollar Neutrality 市場中性對沖；法定原始保證金為總市值之 13.5%)*")
 
     # 4.4 歷史回測績效與收斂週期 (12 欄 Metric Cards，2020年1月1日至今)
     st.markdown("### 📊 回測績效與收斂週期摘要 (2020年1月1日至今)")

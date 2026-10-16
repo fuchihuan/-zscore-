@@ -10,6 +10,7 @@
 6. 每月第三個禮拜三結算日強制平倉，次日重新開倉（含轉倉成本）
 """
 
+import math
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -839,23 +840,48 @@ def calc_trading_cost(price, contracts, slippage_ticks=0.0, commission=COMMISSIO
     return tax + comm + slippage
 
 
-def find_min_contracts(price_s1, price_s2, sym1=None, sym2=None):
-    """找最少配對口數（以實質合約等值平衡為目標，加入口數懲罰）"""
+def find_min_contracts(price_s1, price_s2, sym1=None, sym2=None, tolerance=0.10, max_contracts=10, *args, **kwargs):
+    """
+    依「雙邊市值差距在約 10% 內皆可接受」為原則，尋找「總口數最小」之最簡整數配對：
+    1. 逐層遞增搜尋總口數 T = c1 + c2 (從 2 口開始：2, 3, 4, ...)。
+    2. 一旦在某個最小總口數 T 下，存在互質整數 (c1, c2) 使雙邊市值相對誤差 diff <= tolerance (10%)，
+       即判定為最優解（若同口數有多組符合，取誤差最小者）。
+    3. 若 10 口內無任何組合能在 10% 內，則取綜合誤差最小的最優解。
+    """
     mult1 = 1000 if (sym1 and is_cme_crude(sym1)) else SHARES_PER_CONTRACT
     mult2 = 1000 if (sym2 and is_cme_crude(sym2)) else SHARES_PER_CONTRACT
-    target_ratio = (price_s2 * mult2) / (price_s1 * mult1)
+    p1 = float(price_s1) * mult1 if price_s1 and price_s1 > 0 else 1.0
+    p2 = float(price_s2) * mult2 if price_s2 and price_s2 > 0 else 1.0
+
+    for total in range(2, max_contracts * 2 + 1):
+        candidates = []
+        for c1 in range(1, total):
+            c2 = total - c1
+            if c1 > max_contracts or c2 > max_contracts:
+                continue
+            if math.gcd(c1, c2) > 1:
+                continue
+            v1, v2 = c1 * p1, c2 * p2
+            diff = abs(v1 - v2) / max(v1, v2)
+            if diff <= tolerance:
+                candidates.append((diff, c1, c2))
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            return candidates[0][1], candidates[0][2]
+
+    best_c1, best_c2 = 1, 1
     best_score = float('inf')
-    best_s1, best_s2 = 1, 1
-    for s2 in range(1, 21):
-        for s1 in range(1, 21):
-            ratio = s1 / s2
-            error = abs(ratio - target_ratio)
-            # 加入口數懲罰，避免為了極微小的精確率而讓合約口數暴增
-            score = error + (s1 + s2) * 0.015
+    for c1 in range(1, max_contracts + 1):
+        for c2 in range(1, max_contracts + 1):
+            if math.gcd(c1, c2) > 1:
+                continue
+            v1, v2 = c1 * p1, c2 * p2
+            diff = abs(v1 - v2) / max(v1, v2)
+            score = diff + (c1 + c2) * 0.015
             if score < best_score:
                 best_score = score
-                best_s1, best_s2 = s1, s2
-    return best_s1, best_s2
+                best_c1, best_c2 = c1, c2
+    return best_c1, best_c2
 
 
 def calc_max_contracts(price_s1, price_s2, capital, margin_rate=MARGIN_RATE, sym1=None, sym2=None):
